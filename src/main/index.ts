@@ -47,7 +47,12 @@ function formatImportError(error: unknown): string {
     return READ_FILE_ERROR_MESSAGE
   }
   const message = error instanceof Error ? error.message : String(error)
-  if (/EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(message)) {
+  // SheetJS (xlsx) 在 Windows 上文件被占用/无权限时会抛出: "Cannot access file <path>"
+  if (
+    /EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process|cannot access file|cannot save file/i.test(
+      message
+    )
+  ) {
     return READ_FILE_ERROR_MESSAGE
   }
   return `导入失败：${String(error)}`

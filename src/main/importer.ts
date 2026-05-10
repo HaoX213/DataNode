@@ -11,6 +11,17 @@ export type ImportResult = {
   inserted: number
 }
 
+const READ_IMPORT_FILE_MESSAGE =
+  '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或确认当前账号有权限访问该文件；也可以尝试将其移动到其他目录后重试。'
+
+function formatReadImportError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/cannot access file|cannot save file|EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(message)) {
+    return READ_IMPORT_FILE_MESSAGE
+  }
+  return `导入失败：${message}`
+}
+
 function normalizeCell(value: unknown): string {
   if (value === null || value === undefined) return ''
   return String(value).trim()
@@ -23,18 +34,29 @@ function isValidHeaderCell(value: string): boolean {
 }
 
 export async function importExcelFile(filePath: string, projectId: number): Promise<ImportResult> {
-  const workbook = XLSX.readFile(filePath, { cellDates: true })
+  let workbook: XLSX.WorkBook
+  try {
+    workbook = XLSX.readFile(filePath, { cellDates: true })
+  } catch (error) {
+    return { success: false, message: formatReadImportError(error), inserted: 0 }
+  }
+
   const firstSheetName = workbook.SheetNames[0]
   if (!firstSheetName) {
     return { success: false, message: 'Excel 中未找到可读取工作表', inserted: 0 }
   }
 
   const sheet = workbook.Sheets[firstSheetName]
-  const matrix = XLSX.utils.sheet_to_json<(string | number | Date | null)[]>(sheet, {
-    header: 1,
-    raw: false,
-    defval: ''
-  })
+  let matrix: (string | number | Date | null)[][]
+  try {
+    matrix = XLSX.utils.sheet_to_json<(string | number | Date | null)[]>(sheet, {
+      header: 1,
+      raw: false,
+      defval: ''
+    })
+  } catch (error) {
+    return { success: false, message: formatReadImportError(error), inserted: 0 }
+  }
 
   if (matrix.length === 0) {
     return { success: false, message: 'Excel 为空，未导入数据', inserted: 0 }
@@ -93,16 +115,26 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
     })
   }
 
-  const inserted = insertExcelRows(payload)
-  return {
-    success: true,
-    message: `Excel 导入完成：${path.basename(filePath)}，共写入 ${inserted} 行`,
-    inserted
+  try {
+    const inserted = insertExcelRows(payload)
+    return {
+      success: true,
+      message: `Excel 导入完成：${path.basename(filePath)}，共写入 ${inserted} 行`,
+      inserted
+    }
+  } catch (error) {
+    return { success: false, message: formatReadImportError(error), inserted: 0 }
   }
 }
 
 export async function importDocxFile(filePath: string, projectId: number): Promise<ImportResult> {
-  const buffer = await readFile(filePath)
+  let buffer: Buffer
+  try {
+    buffer = await readFile(filePath)
+  } catch (error) {
+    return { success: false, message: formatReadImportError(error), inserted: 0 }
+  }
+
   const result = await mammoth.extractRawText({ buffer })
   const text = result.value.trim()
   if (!text) {
@@ -110,12 +142,17 @@ export async function importDocxFile(filePath: string, projectId: number): Promi
   }
 
   const notebookId = getDefaultNotebookId()
-  insertDocumentItem({
-    notebookId,
-    projectId,
-    sourceFilePath: filePath,
-    contentText: text
-  })
+  try {
+    insertDocumentItem({
+      notebookId,
+      projectId,
+      sourceFilePath: filePath,
+      contentText: text
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { success: false, message: `导入失败：${message}`, inserted: 0 }
+  }
 
   return {
     success: true,
@@ -137,19 +174,23 @@ export async function importAssetFile(filePath: string, title: string, projectId
   }
 
   const assetsDir = path.join(app.getPath('userData'), 'assets')
-  await mkdir(assetsDir, { recursive: true })
-  const storedPath = path.join(assetsDir, safeFileName(filePath))
-  await copyFile(filePath, storedPath)
+  try {
+    await mkdir(assetsDir, { recursive: true })
+    const storedPath = path.join(assetsDir, safeFileName(filePath))
+    await copyFile(filePath, storedPath)
 
-  const notebookId = getDefaultNotebookId()
-  insertAssetItem({
-    notebookId,
-    projectId,
-    title: normalizedTitle,
-    sourceFilePath: storedPath,
-    originalFilePath: filePath,
-    extension: path.extname(filePath).toLowerCase()
-  })
+    const notebookId = getDefaultNotebookId()
+    insertAssetItem({
+      notebookId,
+      projectId,
+      title: normalizedTitle,
+      sourceFilePath: storedPath,
+      originalFilePath: filePath,
+      extension: path.extname(filePath).toLowerCase()
+    })
+  } catch (error) {
+    return { success: false, message: formatReadImportError(error), inserted: 0 }
+  }
 
   return {
     success: true,
