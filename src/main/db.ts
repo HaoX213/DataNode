@@ -1,8 +1,24 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
-import { join } from 'node:path'
+import { mkdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 
 let db: Database.Database | null = null
+let initialized = false
+
+export function setStoragePath(storagePath: string): void {
+  const trimmedPath = storagePath.trim()
+  if (!trimmedPath) {
+    throw new Error('存储路径不能为空')
+  }
+  const normalizedPath = resolve(trimmedPath)
+  if (db) {
+    if (resolve(app.getPath('userData')) === normalizedPath) return
+    throw new Error('数据库已经初始化，无法切换存储路径')
+  }
+  mkdirSync(normalizedPath, { recursive: true })
+  app.setPath('userData', normalizedPath)
+}
 
 function getDb(): Database.Database {
   if (!db) {
@@ -160,6 +176,7 @@ function ensureItemsSupportsAssetNodes(database: Database.Database): void {
 }
 
 export function initDatabase(): void {
+  if (initialized) return
   const database = getDb()
   database.exec(`
     CREATE TABLE IF NOT EXISTS notebooks (
@@ -248,6 +265,7 @@ export function initDatabase(): void {
       .prepare("INSERT INTO notebooks (name, description) VALUES ('默认笔记本', '系统初始化创建')")
       .run()
   }
+  initialized = true
 }
 
 export type NotebookRow = {

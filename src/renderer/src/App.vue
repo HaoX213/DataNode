@@ -104,6 +104,9 @@ const settingsVisible = ref(false)
 const settingsLoading = ref(false)
 const savingSettings = ref(false)
 const storagePath = ref('')
+const appReady = ref(false)
+const firstLaunchStorageDialogVisible = ref(false)
+const initialStorageLoading = ref(false)
 const sidebarCollapsed = ref(false)
 const creatingProject = ref(false)
 const projects = ref<ProjectRow[]>([])
@@ -523,6 +526,40 @@ const loadStoragePath = (): void => {
   storagePath.value = localStorage.getItem(STORAGE_PATH_KEY) ?? ''
 }
 
+const loadInitialData = async (): Promise<void> => {
+  await loadProjects()
+  await refreshItems()
+  await loadAllTags()
+}
+
+const initializeStorageAndLoadApp = async (selectedPath: string): Promise<boolean> => {
+  const normalizedPath = selectedPath.trim()
+  if (!normalizedPath) {
+    ElMessage.warning('请先选择数据存储位置')
+    return false
+  }
+
+  initialStorageLoading.value = true
+  try {
+    const result = await window.api.initializeStoragePath(normalizedPath)
+    if (!result.success) {
+      ElMessage.error(result.message || '存储路径初始化失败')
+      return false
+    }
+    storagePath.value = normalizedPath
+    localStorage.setItem(STORAGE_PATH_KEY, normalizedPath)
+    await loadInitialData()
+    appReady.value = true
+    firstLaunchStorageDialogVisible.value = false
+    return true
+  } catch (error) {
+    ElMessage.error(`存储路径初始化失败：${String(error)}`)
+    return false
+  } finally {
+    initialStorageLoading.value = false
+  }
+}
+
 const chooseStoragePath = async (): Promise<void> => {
   try {
     const selectedPath = await window.api.openDirectoryDialog()
@@ -530,6 +567,17 @@ const chooseStoragePath = async (): Promise<void> => {
     storagePath.value = selectedPath
     localStorage.setItem(STORAGE_PATH_KEY, selectedPath)
     ElMessage.success('存储路径已保存')
+  } catch (error) {
+    ElMessage.error(`选择文件夹失败：${String(error)}`)
+  }
+}
+
+const chooseInitialStoragePath = async (): Promise<void> => {
+  try {
+    const selectedPath = await window.api.openDirectoryDialog()
+    if (!selectedPath) return
+    const initialized = await initializeStorageAndLoadApp(selectedPath)
+    if (initialized) ElMessage.success('存储路径已保存')
   } catch (error) {
     ElMessage.error(`选择文件夹失败：${String(error)}`)
   }
@@ -1373,11 +1421,18 @@ watch([graphTypeFilters, graphTagFilters], async () => {
 
 onMounted(async () => {
   loadStoragePath()
-  await loadProjects()
-  await refreshItems()
-  await loadAllTags()
   window.addEventListener('resize', resizeGraph)
   window.addEventListener('click', closeContextMenu)
+  if (!storagePath.value.trim()) {
+    firstLaunchStorageDialogVisible.value = true
+    return
+  }
+  const initialized = await initializeStorageAndLoadApp(storagePath.value)
+  if (!initialized) {
+    localStorage.removeItem(STORAGE_PATH_KEY)
+    storagePath.value = ''
+    firstLaunchStorageDialogVisible.value = true
+  }
 })
 
 onBeforeUnmount(() => {
@@ -1393,7 +1448,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <el-container class="app-wrapper">
+  <el-container v-if="appReady" class="app-wrapper">
     <el-aside :width="sidebarCollapsed ? '64px' : '240px'" class="project-sidebar">
       <div class="sidebar-top">
         <el-button circle text :icon="sidebarCollapsed ? Expand : Fold" @click="sidebarCollapsed = !sidebarCollapsed" />
@@ -1620,11 +1675,29 @@ onUnmounted(() => {
     </el-container>
   </el-container>
 
-  <el-button v-if="!copilotVisible" class="ai-fab" type="primary" @click="copilotVisible = true">
+  <el-dialog
+    v-model="firstLaunchStorageDialogVisible"
+    title="欢迎使用 DataNode - 请选择数据存储位置"
+    width="560px"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :show-close="false"
+  >
+    <p class="first-launch-storage-tip">
+      为了避免占用您的 C 盘空间，请选择一个文件夹作为本软件的数据和缓存存储目录。
+    </p>
+    <div class="first-launch-storage-action">
+      <el-button type="primary" :loading="initialStorageLoading" @click="chooseInitialStoragePath">
+        选择文件夹
+      </el-button>
+    </div>
+  </el-dialog>
+
+  <el-button v-if="appReady && !copilotVisible" class="ai-fab" type="primary" @click="copilotVisible = true">
     <el-icon><MagicStick /></el-icon>
   </el-button>
 
-  <div v-if="copilotVisible" class="copilot-panel">
+  <div v-if="appReady && copilotVisible" class="copilot-panel">
     <div class="copilot-header">
       <div>
         <div class="copilot-title">知识库 AI 助手</div>
@@ -2153,6 +2226,19 @@ onUnmounted(() => {
 
 .storage-path-row .el-input {
   flex: 1;
+}
+
+.first-launch-storage-tip {
+  margin: 0 0 20px;
+  color: #4b5563;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.first-launch-storage-action {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
 }
 
 .filter-group {

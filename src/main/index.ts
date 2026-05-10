@@ -1,5 +1,7 @@
 import { app, shell, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
 import { join } from 'path'
+import { access } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import {
@@ -25,6 +27,7 @@ import {
   searchItems,
   searchNodes,
   saveAppSettings,
+  setStoragePath,
   updateNodeDetail,
   updateNodePositions
 } from './db'
@@ -33,6 +36,17 @@ import { chatWithKnowledgeBase, summarizeNodeContext, type AiChatMessage } from 
 
 function toSerializable<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+const READ_FILE_ERROR_MESSAGE =
+  '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或确认当前账号有权限访问该文件；也可以尝试将其移动到其他目录后重试。'
+
+function formatImportError(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code) : ''
+  if (['EACCES', 'EPERM', 'EBUSY', 'ENOENT'].includes(code)) {
+    return READ_FILE_ERROR_MESSAGE
+  }
+  return `导入失败：${String(error)}`
 }
 
 function createWindow(): void {
@@ -71,8 +85,6 @@ function createWindow(): void {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
-  initDatabase()
-
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -81,6 +93,16 @@ app.whenReady().then(() => {
   // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
+  })
+
+  ipcMain.handle('app:initialize-storage', (_, storagePath: string) => {
+    try {
+      setStoragePath(storagePath)
+      initDatabase()
+      return { success: true, message: '存储路径初始化成功' }
+    } catch (error) {
+      return { success: false, message: `存储路径初始化失败：${String(error)}` }
+    }
   })
 
   ipcMain.handle('db:notebooks:list', () => listNotebooks())
@@ -346,8 +368,13 @@ app.whenReady().then(() => {
     if (!filePath) {
       return { success: false, message: '未选择文件', inserted: 0 }
     }
-    const ext = filePath.toLowerCase()
+    try {
+      await access(filePath, constants.R_OK)
+    } catch (error) {
+      return { success: false, message: formatImportError(error), inserted: 0 }
+    }
 
+    const ext = filePath.toLowerCase()
     try {
       if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
         return importExcelFile(filePath, Number(projectId))
@@ -357,7 +384,7 @@ app.whenReady().then(() => {
       }
       return importAssetFile(filePath, title, Number(projectId))
     } catch (error) {
-      return { success: false, message: `导入失败: ${String(error)}`, inserted: 0 }
+      return { success: false, message: formatImportError(error), inserted: 0 }
     }
   })
 

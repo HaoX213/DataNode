@@ -185,6 +185,8 @@ const api = {
   listProjects: (): Promise<ProjectsResult> => ipcRenderer.invoke('projects:list'),
   createProject: (name: string): Promise<ProjectResult> => ipcRenderer.invoke('projects:create', name),
   deleteProject: (projectId: number): Promise<ActionResult> => ipcRenderer.invoke('projects:delete', projectId),
+  initializeStoragePath: (storagePath: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('app:initialize-storage', storagePath),
   listItems: (projectId?: number): Promise<ItemRow[]> => ipcRenderer.invoke('db:items:list', projectId),
   searchItems: (keyword: string, projectId?: number): Promise<ItemRow[]> => ipcRenderer.invoke('db:items:search', keyword, projectId),
   openDirectoryDialog: (): Promise<string> => ipcRenderer.invoke('open-directory-dialog'),

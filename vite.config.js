@@ -27,6 +27,7 @@ export default defineConfig({
             outDir: resolve(__dirname, 'out/main'),
             emptyOutDir: true,
             rollupOptions: {
+              external: ['better-sqlite3'],
               output: {
                 entryFileNames: 'index.js'
               }

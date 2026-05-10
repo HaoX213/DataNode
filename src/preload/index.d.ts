@@ -26,6 +26,7 @@ type DataNodeApi = {
   listProjects: () => Promise<ProjectsResult>
   createProject: (name: string) => Promise<ProjectResult>
   deleteProject: (projectId: number) => Promise<ActionResult>
+  initializeStoragePath: (storagePath: string) => Promise<ActionResult>
   listItems: (projectId?: number) => Promise<ItemRow[]>
   searchItems: (keyword: string, projectId?: number) => Promise<ItemRow[]>
   openDirectoryDialog: () => Promise<string>
