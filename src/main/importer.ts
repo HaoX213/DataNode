@@ -3,6 +3,7 @@ import path from 'node:path'
 import { app } from 'electron'
 import * as XLSX from 'xlsx'
 import mammoth from 'mammoth'
+import { appendLog } from './app-log'
 import { getDefaultNotebookId, insertAssetItem, insertDocumentItem, insertExcelRows } from './db'
 
 export type ImportResult = {
@@ -14,8 +15,11 @@ export type ImportResult = {
 const READ_IMPORT_FILE_MESSAGE =
   '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或确认当前账号有权限访问该文件；也可以尝试将其移动到其他目录后重试。'
 
-function formatReadImportError(error: unknown): string {
+function formatReadImportError(error: unknown, logContext?: string): string {
   const message = error instanceof Error ? error.message : String(error)
+  if (logContext) {
+    appendLog('ERROR', `${logContext} — ${message}`)
+  }
   if (/cannot access file|cannot save file|EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(message)) {
     return READ_IMPORT_FILE_MESSAGE
   }
@@ -36,9 +40,17 @@ function isValidHeaderCell(value: string): boolean {
 export async function importExcelFile(filePath: string, projectId: number): Promise<ImportResult> {
   let workbook: XLSX.WorkBook
   try {
-    workbook = XLSX.readFile(filePath, { cellDates: true })
+    // SheetJS 的 readFile 在部分 Windows/Electron 环境下会误报 “Cannot access file”；
+    // 先用 Node 读入 Buffer 再 parse，与权限检测及 docx 路径一致。
+    const resolvedPath = path.resolve(filePath)
+    const buffer = await readFile(resolvedPath)
+    workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
   } catch (error) {
-    return { success: false, message: formatReadImportError(error), inserted: 0 }
+    return {
+      success: false,
+      message: formatReadImportError(error, `Excel 读取失败: ${filePath}`),
+      inserted: 0
+    }
   }
 
   const firstSheetName = workbook.SheetNames[0]
@@ -55,7 +67,11 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
       defval: ''
     })
   } catch (error) {
-    return { success: false, message: formatReadImportError(error), inserted: 0 }
+    return {
+      success: false,
+      message: formatReadImportError(error, `Excel 解析工作表失败: ${filePath}`),
+      inserted: 0
+    }
   }
 
   if (matrix.length === 0) {
@@ -123,16 +139,24 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
       inserted
     }
   } catch (error) {
-    return { success: false, message: formatReadImportError(error), inserted: 0 }
+    return {
+      success: false,
+      message: formatReadImportError(error, `Excel 写入数据库失败: ${filePath}`),
+      inserted: 0
+    }
   }
 }
 
 export async function importDocxFile(filePath: string, projectId: number): Promise<ImportResult> {
   let buffer: Buffer
   try {
-    buffer = await readFile(filePath)
+    buffer = await readFile(path.resolve(filePath))
   } catch (error) {
-    return { success: false, message: formatReadImportError(error), inserted: 0 }
+    return {
+      success: false,
+      message: formatReadImportError(error, `Word 读取失败: ${filePath}`),
+      inserted: 0
+    }
   }
 
   const result = await mammoth.extractRawText({ buffer })
@@ -177,7 +201,7 @@ export async function importAssetFile(filePath: string, title: string, projectId
   try {
     await mkdir(assetsDir, { recursive: true })
     const storedPath = path.join(assetsDir, safeFileName(filePath))
-    await copyFile(filePath, storedPath)
+    await copyFile(path.resolve(filePath), storedPath)
 
     const notebookId = getDefaultNotebookId()
     insertAssetItem({
@@ -189,7 +213,11 @@ export async function importAssetFile(filePath: string, title: string, projectId
       extension: path.extname(filePath).toLowerCase()
     })
   } catch (error) {
-    return { success: false, message: formatReadImportError(error), inserted: 0 }
+    return {
+      success: false,
+      message: formatReadImportError(error, `资产文件复制失败: ${filePath}`),
+      inserted: 0
+    }
   }
 
   return {
