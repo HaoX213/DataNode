@@ -176,6 +176,15 @@ const hiddenNodeIds = ref<Set<number>>(new Set())
 const STORAGE_PATH_KEY = 'app_storage_path'
 let graphSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
+const formatImportUiError = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error)
+  const friendlyMessage = '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或尝试将其移动到其他目录后重试。'
+  if (/Error invoking remote method|EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(message)) {
+    return friendlyMessage
+  }
+  return `导入失败：${message}`
+}
+
 const parseJsonSafely = (input: string): Record<string, string> => {
   if (!input?.trim()) return {}
   try {
@@ -713,7 +722,7 @@ const importFile = async (): Promise<void> => {
     ElMessage.success(result.message)
     await runSearch()
   } catch (error) {
-    ElMessage.error(`导入失败：${String(error)}`)
+    ElMessage.error(formatImportUiError(error))
   } finally {
     importing.value = false
   }

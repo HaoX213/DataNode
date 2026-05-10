@@ -46,6 +46,10 @@ function formatImportError(error: unknown): string {
   if (['EACCES', 'EPERM', 'EBUSY', 'ENOENT'].includes(code)) {
     return READ_FILE_ERROR_MESSAGE
   }
+  const message = error instanceof Error ? error.message : String(error)
+  if (/EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(message)) {
+    return READ_FILE_ERROR_MESSAGE
+  }
   return `导入失败：${String(error)}`
 }
 
@@ -377,12 +381,12 @@ app.whenReady().then(() => {
     const ext = filePath.toLowerCase()
     try {
       if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
-        return importExcelFile(filePath, Number(projectId))
+        return await importExcelFile(filePath, Number(projectId))
       }
       if (ext.endsWith('.docx')) {
-        return importDocxFile(filePath, Number(projectId))
+        return await importDocxFile(filePath, Number(projectId))
       }
-      return importAssetFile(filePath, title, Number(projectId))
+      return await importAssetFile(filePath, title, Number(projectId))
     } catch (error) {
       return { success: false, message: formatImportError(error), inserted: 0 }
     }
