@@ -80,6 +80,12 @@ type AppSettings = {
   app_theme: string
   app_language: string
 }
+type DataPathsSnapshot = {
+  userData: string
+  logsDir: string
+  logFile: string
+  dbFile: string
+}
 type ProjectRow = {
   id: number
   name: string
@@ -106,6 +112,13 @@ const savingSettings = ref(false)
 const storagePath = ref('')
 const appReady = ref(false)
 const firstLaunchStorageDialogVisible = ref(false)
+const firstLaunchPendingPath = ref('')
+const dataDiagnostic = ref<DataPathsSnapshot>({
+  userData: '',
+  logsDir: '',
+  logFile: '',
+  dbFile: ''
+})
 const initialStorageLoading = ref(false)
 const sidebarCollapsed = ref(false)
 const creatingProject = ref(false)
@@ -544,6 +557,55 @@ const openSettingsDialog = async (): Promise<void> => {
     ElMessage.error(`设置加载失败：${String(error)}`)
   } finally {
     settingsLoading.value = false
+    void refreshDataDiagnostic()
+  }
+}
+
+const refreshDataDiagnostic = async (): Promise<void> => {
+  try {
+    const paths = await window.api.getDataPaths()
+    dataDiagnostic.value = paths
+  } catch {
+    /* 设置窗口已开但主进程不可用时忽略 */
+  }
+}
+
+const openDataDirectory = async (): Promise<void> => {
+  try {
+    const result = await window.api.openUserDataFolder()
+    if (!result.success) {
+      ElMessage.error(result.message || '打开数据目录失败')
+    }
+  } catch (error) {
+    ElMessage.error(`打开数据目录失败：${String(error)}`)
+  }
+}
+
+const openLogsDirectory = async (): Promise<void> => {
+  try {
+    const result = await window.api.openLogsFolder()
+    if (!result.success) {
+      ElMessage.error(result.message || '打开日志目录失败')
+    }
+  } catch (error) {
+    ElMessage.error(`打开日志目录失败：${String(error)}`)
+  }
+}
+
+const copyDiagnosticPath = async (path: string, label: string): Promise<void> => {
+  if (!path.trim()) {
+    ElMessage.warning('暂无可用路径')
+    return
+  }
+  try {
+    const result = await window.api.copyText(path)
+    if (!result.success) {
+      ElMessage.error(result.message || '复制失败')
+      return
+    }
+    ElMessage.success(`${label}已复制到剪贴板`)
+  } catch (error) {
+    ElMessage.error(`复制失败：${String(error)}`)
   }
 }
 
@@ -576,6 +638,7 @@ const initializeStorageAndLoadApp = async (selectedPath: string): Promise<boolea
     await loadInitialData()
     appReady.value = true
     firstLaunchStorageDialogVisible.value = false
+    firstLaunchPendingPath.value = ''
     return true
   } catch (error) {
     ElMessage.error(`存储路径初始化失败：${String(error)}`)
@@ -597,20 +660,48 @@ const chooseStoragePath = async (): Promise<void> => {
   }
 }
 
-const chooseInitialStoragePath = async (): Promise<void> => {
+const pickFirstLaunchFolder = async (): Promise<void> => {
   try {
     const selectedPath = await window.api.openDirectoryDialog()
     if (!selectedPath) return
-    const initialized = await initializeStorageAndLoadApp(selectedPath)
-    if (initialized) ElMessage.success('存储路径已保存')
+    firstLaunchPendingPath.value = selectedPath
   } catch (error) {
     ElMessage.error(`选择文件夹失败：${String(error)}`)
+  }
+}
+
+const confirmFirstLaunchStorage = async (): Promise<void> => {
+  const pending = firstLaunchPendingPath.value.trim()
+  if (!pending) {
+    ElMessage.warning('请先选择数据存储位置')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将在此目录创建数据库文件 datanode.db 与日志目录 logs\\（运行记录写入 datanode.log）。\n\n路径：\n${pending}\n\n提示：安装程序时选择的「程序安装位置」与此处的「数据目录」不同，请区分备份与排查时查找的路径。`,
+      '确认数据目录',
+      {
+        confirmButtonText: '确认并开始',
+        cancelButtonText: '返回修改',
+        type: 'info'
+      }
+    )
+  } catch {
+    return
+  }
+  const initialized = await initializeStorageAndLoadApp(pending)
+  if (initialized) {
+    ElMessage.success('存储路径已保存')
   }
 }
 
 const handleFileCommand = (command: string): void => {
   if (command === 'import') {
     void importFile()
+    return
+  }
+  if (command === 'open-data-folder') {
+    void openDataDirectory()
     return
   }
   if (command === 'note') {
@@ -1528,6 +1619,7 @@ onUnmounted(() => {
               <el-dropdown-menu>
                 <el-dropdown-item command="import" :icon="Upload">导入 Excel</el-dropdown-item>
                 <el-dropdown-item command="import" :icon="FolderOpened">导入文档 / 文件</el-dropdown-item>
+                <el-dropdown-item command="open-data-folder" :icon="FolderOpened">打开数据文件夹</el-dropdown-item>
                 <el-dropdown-item command="note" :icon="DocumentAdd">新建笔记</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -1709,11 +1801,26 @@ onUnmounted(() => {
     :show-close="false"
   >
     <p class="first-launch-storage-tip">
-      为了避免占用您的 C 盘空间，请选择一个文件夹作为本软件的数据和缓存存储目录。
+      安装 NSIS 安装包时可以自定义<strong>程序安装目录</strong>（与其它 Windows 软件相同）。此处选择的是<strong>数据目录</strong>，用于存放数据库
+      <code>datanode.db</code>、运行日志 <code>logs\datanode.log</code> 等，便于备份与排查问题。建议选大盘或您习惯管理的文件夹。
     </p>
-    <div class="first-launch-storage-action">
-      <el-button type="primary" :loading="initialStorageLoading" @click="chooseInitialStoragePath">
-        选择文件夹
+    <el-input
+      v-model="firstLaunchPendingPath"
+      class="first-launch-path-input"
+      type="textarea"
+      :rows="2"
+      readonly
+      placeholder="请先点击下方「选择文件夹」"
+    />
+    <div class="first-launch-storage-actions">
+      <el-button @click="pickFirstLaunchFolder">选择文件夹</el-button>
+      <el-button
+        type="primary"
+        :loading="initialStorageLoading"
+        :disabled="!firstLaunchPendingPath.trim()"
+        @click="confirmFirstLaunchStorage"
+      >
+        确认并开始
       </el-button>
     </div>
   </el-dialog>
@@ -1889,9 +1996,12 @@ onUnmounted(() => {
         <el-form label-width="120px" label-position="left">
           <el-form-item label="存储路径">
             <div class="storage-path-row">
-              <el-input v-model="storagePath" placeholder="请选择本地文件存储路径" clearable />
+              <el-input v-model="storagePath" placeholder="请选择本地文件存储路径（已选路径会写入本地；切换需在首次启动前或清空后重选）" clearable />
               <el-button @click="chooseStoragePath">选择文件夹</el-button>
             </div>
+            <p class="settings-hint">
+              与安装目录不同：数据目录含数据库与日志；遇到问题可在「数据与诊断」中打开文件夹或复制路径。
+            </p>
           </el-form-item>
           <el-form-item label="主题">
             <el-radio-group v-model="settingsForm.app_theme">
@@ -1904,6 +2014,24 @@ onUnmounted(() => {
               <el-option label="简体中文" value="zh-CN" />
               <el-option label="English" value="en-US" />
             </el-select>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+      <el-tab-pane label="数据与诊断">
+        <el-form label-width="120px" label-position="left">
+          <el-form-item label="数据目录">
+            <el-input :model-value="dataDiagnostic.userData" type="textarea" :rows="2" readonly />
+          </el-form-item>
+          <el-form-item label="日志文件">
+            <el-input :model-value="dataDiagnostic.logFile" type="textarea" :rows="2" readonly />
+          </el-form-item>
+          <el-form-item>
+            <div class="diagnostic-actions">
+              <el-button @click="openDataDirectory">打开数据目录</el-button>
+              <el-button @click="openLogsDirectory">打开日志目录</el-button>
+              <el-button @click="copyDiagnosticPath(dataDiagnostic.userData, '数据目录路径')">复制数据路径</el-button>
+              <el-button @click="copyDiagnosticPath(dataDiagnostic.logFile, '日志文件路径')">复制日志路径</el-button>
+            </div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -2260,10 +2388,34 @@ onUnmounted(() => {
   line-height: 1.8;
 }
 
-.first-launch-storage-action {
+.first-launch-path-input {
+  margin-bottom: 16px;
+}
+
+.first-launch-path-input :deep(.el-textarea__inner) {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px;
+}
+
+.first-launch-storage-actions {
   display: flex;
-  justify-content: center;
-  padding: 8px 0 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.settings-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.6;
+}
+
+.diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .filter-group {

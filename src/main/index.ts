@@ -1,7 +1,8 @@
-import { app, shell, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
+import { app, shell, BrowserWindow, dialog, ipcMain, clipboard, type OpenDialogOptions } from 'electron'
 import { join } from 'path'
 import { access } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { constants, mkdirSync } from 'node:fs'
+import { appendLog } from './app-log'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import {
@@ -96,6 +97,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
+  appendLog('INFO', `Application ready (Electron ${process.versions.electron}, Node ${process.versions.node})`)
 
   // Default open or close DevTools by F12 in development
   // and ignore CommandOrControl + R in production.
@@ -108,9 +110,51 @@ app.whenReady().then(() => {
     try {
       setStoragePath(storagePath)
       initDatabase()
+      appendLog('INFO', `Storage initialized at ${storagePath.trim()}`)
       return { success: true, message: '存储路径初始化成功' }
     } catch (error) {
-      return { success: false, message: `存储路径初始化失败：${String(error)}` }
+      const message = `存储路径初始化失败：${String(error)}`
+      appendLog('ERROR', message)
+      return { success: false, message }
+    }
+  })
+
+  ipcMain.handle('app:get-data-paths', () => {
+    const userData = app.getPath('userData')
+    const logsDir = join(userData, 'logs')
+    return {
+      userData,
+      logsDir,
+      logFile: join(logsDir, 'datanode.log'),
+      dbFile: join(userData, 'datanode.db')
+    }
+  })
+
+  ipcMain.handle('app:open-user-data-folder', async () => {
+    const userData = app.getPath('userData')
+    const err = await shell.openPath(userData)
+    if (err) return { success: false, message: err }
+    return { success: true, message: '已打开数据目录' }
+  })
+
+  ipcMain.handle('app:open-logs-folder', async () => {
+    const logsDir = join(app.getPath('userData'), 'logs')
+    try {
+      mkdirSync(logsDir, { recursive: true })
+    } catch (error) {
+      return { success: false, message: `无法创建日志目录：${String(error)}` }
+    }
+    const err = await shell.openPath(logsDir)
+    if (err) return { success: false, message: err }
+    return { success: true, message: '已打开日志目录' }
+  })
+
+  ipcMain.handle('app:copy-text', (_, text: string) => {
+    try {
+      clipboard.writeText(text ?? '')
+      return { success: true, message: '已复制到剪贴板' }
+    } catch (error) {
+      return { success: false, message: `复制失败：${String(error)}` }
     }
   })
 
@@ -380,7 +424,9 @@ app.whenReady().then(() => {
     try {
       await access(filePath, constants.R_OK)
     } catch (error) {
-      return { success: false, message: formatImportError(error), inserted: 0 }
+      const message = formatImportError(error)
+      appendLog('ERROR', `Import read check failed: ${filePath} — ${message}`)
+      return { success: false, message, inserted: 0 }
     }
 
     const ext = filePath.toLowerCase()
@@ -393,7 +439,9 @@ app.whenReady().then(() => {
       }
       return await importAssetFile(filePath, title, Number(projectId))
     } catch (error) {
-      return { success: false, message: formatImportError(error), inserted: 0 }
+      const message = formatImportError(error)
+      appendLog('ERROR', `Import failed: ${filePath} — ${message}`)
+      return { success: false, message, inserted: 0 }
     }
   })
 

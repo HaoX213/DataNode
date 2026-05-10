@@ -5,6 +5,7 @@ import type {
   AiChatResult,
   AppSettings,
   AiSummaryResult,
+  DataPaths,
   GraphDataResult,
   GraphFilterInput,
   ImportResult,
@@ -27,6 +28,10 @@ type DataNodeApi = {
   createProject: (name: string) => Promise<ProjectResult>
   deleteProject: (projectId: number) => Promise<ActionResult>
   initializeStoragePath: (storagePath: string) => Promise<ActionResult>
+  getDataPaths: () => Promise<DataPaths>
+  openUserDataFolder: () => Promise<ActionResult>
+  openLogsFolder: () => Promise<ActionResult>
+  copyText: (text: string) => Promise<ActionResult>
   listItems: (projectId?: number) => Promise<ItemRow[]>
   searchItems: (keyword: string, projectId?: number) => Promise<ItemRow[]>
   openDirectoryDialog: () => Promise<string>

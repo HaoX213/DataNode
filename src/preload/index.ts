@@ -180,6 +180,13 @@ export type SettingsResult = {
   data: AppSettings
 }
 
+export type DataPaths = {
+  userData: string
+  logsDir: string
+  logFile: string
+  dbFile: string
+}
+
 const api = {
   listNotebooks: (): Promise<NotebookRow[]> => ipcRenderer.invoke('db:notebooks:list'),
   listProjects: (): Promise<ProjectsResult> => ipcRenderer.invoke('projects:list'),
@@ -187,6 +194,10 @@ const api = {
   deleteProject: (projectId: number): Promise<ActionResult> => ipcRenderer.invoke('projects:delete', projectId),
   initializeStoragePath: (storagePath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('app:initialize-storage', storagePath),
+  getDataPaths: (): Promise<DataPaths> => ipcRenderer.invoke('app:get-data-paths'),
+  openUserDataFolder: (): Promise<ActionResult> => ipcRenderer.invoke('app:open-user-data-folder'),
+  openLogsFolder: (): Promise<ActionResult> => ipcRenderer.invoke('app:open-logs-folder'),
+  copyText: (text: string): Promise<ActionResult> => ipcRenderer.invoke('app:copy-text', text),
   listItems: (projectId?: number): Promise<ItemRow[]> => ipcRenderer.invoke('db:items:list', projectId),
   searchItems: (keyword: string, projectId?: number): Promise<ItemRow[]> => ipcRenderer.invoke('db:items:search', keyword, projectId),
   openDirectoryDialog: (): Promise<string> => ipcRenderer.invoke('open-directory-dialog'),
