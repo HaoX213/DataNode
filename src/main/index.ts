@@ -1,5 +1,5 @@
 import { app, shell, BrowserWindow, dialog, ipcMain, clipboard, type OpenDialogOptions } from 'electron'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { access } from 'node:fs/promises'
 import { constants, mkdirSync } from 'node:fs'
 import { appendLog } from './app-log'
@@ -421,26 +421,35 @@ app.whenReady().then(() => {
     if (!filePath) {
       return { success: false, message: '未选择文件', inserted: 0 }
     }
+    const extLabel = /\.xlsx$/i.test(filePath)
+      ? '.xlsx'
+      : /\.xls$/i.test(filePath)
+        ? '.xls'
+        : /\.docx$/i.test(filePath)
+          ? '.docx'
+          : 'other'
+    appendLog('INFO', `Import started: ${filePath} (${extLabel}) projectId=${projectId ?? 'default'}`)
+    const resolvedSource = resolve(filePath)
     try {
-      await access(filePath, constants.R_OK)
+      await access(resolvedSource, constants.R_OK)
     } catch (error) {
       const message = formatImportError(error)
       appendLog('ERROR', `Import read check failed: ${filePath} — ${message}`)
       return { success: false, message, inserted: 0 }
     }
 
-    const ext = filePath.toLowerCase()
+    const ext = resolvedSource.toLowerCase()
     try {
       if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
-        return await importExcelFile(filePath, Number(projectId))
+        return await importExcelFile(resolvedSource, Number(projectId))
       }
       if (ext.endsWith('.docx')) {
-        return await importDocxFile(filePath, Number(projectId))
+        return await importDocxFile(resolvedSource, Number(projectId))
       }
-      return await importAssetFile(filePath, title, Number(projectId))
+      return await importAssetFile(resolvedSource, title, Number(projectId))
     } catch (error) {
       const message = formatImportError(error)
-      appendLog('ERROR', `Import failed: ${filePath} — ${message}`)
+      appendLog('ERROR', `Import failed: ${resolvedSource} — ${message}`)
       return { success: false, message, inserted: 0 }
     }
   })

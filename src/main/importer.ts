@@ -17,13 +17,30 @@ const READ_IMPORT_FILE_MESSAGE =
 
 function formatReadImportError(error: unknown, logContext?: string): string {
   const message = error instanceof Error ? error.message : String(error)
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as NodeJS.ErrnoException).code ?? '')
+      : ''
   if (logContext) {
-    appendLog('ERROR', `${logContext} — ${message}`)
+    appendLog('ERROR', `${logContext}${code ? ` [${code}]` : ''} — ${message}`)
   }
   if (/cannot access file|cannot save file|EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(message)) {
     return READ_IMPORT_FILE_MESSAGE
   }
   return `导入失败：${message}`
+}
+
+function readExcelWorkbook(buffer: Buffer): XLSX.WorkBook {
+  try {
+    return XLSX.read(buffer, { type: 'buffer', cellDates: true })
+  } catch (first) {
+    // 少数旧版 .xls / 编码场景下 buffer 模式失败，回退为 binary 字符串解析
+    try {
+      return XLSX.read(buffer.toString('binary'), { type: 'binary', cellDates: true })
+    } catch {
+      throw first
+    }
+  }
 }
 
 function normalizeCell(value: unknown): string {
@@ -44,7 +61,7 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
     // 先用 Node 读入 Buffer 再 parse，与权限检测及 docx 路径一致。
     const resolvedPath = path.resolve(filePath)
     const buffer = await readFile(resolvedPath)
-    workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
+    workbook = readExcelWorkbook(buffer)
   } catch (error) {
     return {
       success: false,

@@ -191,27 +191,37 @@ let graphSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const formatImportUiError = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
-  const friendlyMessage = '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或尝试将其移动到其他目录后重试。'
+  const cleaned = message
+    .replace(/^Error invoking remote method '[^']*':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+  const friendlyMessage =
+    '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或尝试将其移动到其他目录后重试。'
   if (
-    /Error invoking remote method|EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process|cannot access file|cannot save file/i.test(
-      message
+    /cannot access file|cannot save file|EACCES|EPERM|EBUSY|ENOENT|permission|busy|locked|no such file|used by another process/i.test(
+      cleaned
     )
   ) {
     return friendlyMessage
   }
-  return `导入失败：${message}`
+  return cleaned.startsWith('导入失败') ? cleaned : `导入失败：${cleaned || message}`
 }
 
 const formatImportBackendMessage = (raw: string): string => {
-  const friendlyMessage = '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或尝试将其移动到其他目录后重试。'
+  const cleaned = raw
+    .replace(/^Error invoking remote method '[^']*':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+  const friendlyMessage =
+    '读取文件失败，请检查该文件是否正在被 Excel 等其他软件打开，或尝试将其移动到其他目录后重试。'
   if (
-    /cannot access file|cannot save file|写入失败|Error invoking remote method|EACCES|EPERM|EBUSY|ENOENT|permission denied|busy|locked|no such file|used by another process/i.test(
-      raw
+    /cannot access file|cannot save file|EACCES|EPERM|EBUSY|ENOENT|permission denied|busy|locked|no such file|used by another process/i.test(
+      cleaned
     )
   ) {
     return friendlyMessage
   }
-  return raw
+  return cleaned || raw
 }
 
 const parseJsonSafely = (input: string): Record<string, string> => {
