@@ -206,7 +206,8 @@ export type ProjectUiStateV1 = {
 
 export type AiTopicRow = {
   id: number
-  project_id: number
+  /** 项目分支为项目 id；全局 AI 为 null */
+  project_id: number | null
   title: string
   created_at: string
   updated_at: string
@@ -243,6 +244,12 @@ export type AiTopicCreateResult = {
   success: boolean
   message?: string
   data?: { id: number }
+}
+
+export type GlobalAiCurrentTopicResult = {
+  success: boolean
+  message?: string
+  data: number | null
 }
 
 export type AiChatResult = {
@@ -338,6 +345,7 @@ const api = {
     messages: AiChatMessage[]
     context_node_id?: number | null
     project_id?: number | null
+    global_ai?: boolean
     raw_file_preview?: string
     raw_file_path?: string
   }): Promise<AiChatResult> => ipcRenderer.invoke('ai:chat', payload),
@@ -357,7 +365,26 @@ const api = {
     role: 'user' | 'assistant',
     content: string,
     chartJson?: string | null
-  ): Promise<ActionResult> => ipcRenderer.invoke('ai:messages:append', topicId, role, content, chartJson ?? null)
+  ): Promise<ActionResult> => ipcRenderer.invoke('ai:messages:append', topicId, role, content, chartJson ?? null),
+  listGlobalAiTopics: (): Promise<AiTopicsResult> => ipcRenderer.invoke('ai:global:topics:list'),
+  createGlobalAiTopic: (title: string): Promise<AiTopicCreateResult> =>
+    ipcRenderer.invoke('ai:global:topic:create', title),
+  renameGlobalAiTopic: (topicId: number, title: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('ai:global:topic:rename', topicId, title),
+  deleteGlobalAiTopic: (topicId: number): Promise<ActionResult> => ipcRenderer.invoke('ai:global:topic:delete', topicId),
+  listGlobalAiMessages: (topicId: number): Promise<AiMessagesResult> =>
+    ipcRenderer.invoke('ai:global:messages:list', topicId),
+  appendGlobalAiMessage: (
+    topicId: number,
+    role: 'user' | 'assistant',
+    content: string,
+    chartJson?: string | null
+  ): Promise<ActionResult> =>
+    ipcRenderer.invoke('ai:global:messages:append', topicId, role, content, chartJson ?? null),
+  getGlobalAiCurrentTopicId: (): Promise<GlobalAiCurrentTopicResult> =>
+    ipcRenderer.invoke('ai:global:current-topic:get'),
+  setGlobalAiCurrentTopicId: (topicId: number | null): Promise<ActionResult> =>
+    ipcRenderer.invoke('ai:global:current-topic:set', topicId)
 }
 
 export type AppApi = typeof api

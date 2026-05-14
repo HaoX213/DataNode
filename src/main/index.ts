@@ -32,6 +32,14 @@ import {
   deleteAiTopic,
   listAiMessages,
   appendAiMessage,
+  listGlobalAiTopics,
+  createGlobalAiTopic,
+  renameGlobalAiTopic,
+  deleteGlobalAiTopic,
+  listGlobalAiMessages,
+  appendGlobalAiMessage,
+  getGlobalAiCurrentTopicId,
+  setGlobalAiCurrentTopicId,
   removeRelation,
   removeTagFromNode,
   getNodeEdges,
@@ -230,15 +238,15 @@ app.whenReady().then(() => {
     try {
       return { success: true, data: toSerializable(listAiTopics(Number(projectId))) }
     } catch (error) {
-      return { success: false, message: `读取话题失败: ${String(error)}`, data: [] }
+      return { success: false, message: `读取分支失败: ${String(error)}`, data: [] }
     }
   })
   ipcMain.handle('ai:topic:create', (_, projectId: number, title: string) => {
     try {
       const id = createAiTopic(Number(projectId), String(title ?? ''))
-      return { success: true, data: { id }, message: '话题已创建' }
+      return { success: true, data: { id }, message: '分支已创建' }
     } catch (error) {
-      return { success: false, message: `创建话题失败: ${String(error)}` }
+      return { success: false, message: `创建分支失败: ${String(error)}` }
     }
   })
   ipcMain.handle('ai:topic:rename', (_, topicId: number, title: string) => {
@@ -254,7 +262,7 @@ app.whenReady().then(() => {
       deleteAiTopic(Number(topicId))
       return { success: true, message: '已删除' }
     } catch (error) {
-      return { success: false, message: `删除话题失败: ${String(error)}` }
+      return { success: false, message: `删除分支失败: ${String(error)}` }
     }
   })
   ipcMain.handle('ai:messages:list', (_, topicId: number) => {
@@ -276,6 +284,75 @@ app.whenReady().then(() => {
       }
     }
   )
+  ipcMain.handle('ai:global:topics:list', () => {
+    try {
+      return { success: true, data: toSerializable(listGlobalAiTopics()) }
+    } catch (error) {
+      return { success: false, message: `读取全局分支失败: ${String(error)}`, data: [] }
+    }
+  })
+  ipcMain.handle('ai:global:topic:create', (_, title: string) => {
+    try {
+      const id = createGlobalAiTopic(String(title ?? ''))
+      return { success: true, data: { id }, message: '分支已创建' }
+    } catch (error) {
+      return { success: false, message: `创建全局分支失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:global:topic:rename', (_, topicId: number, title: string) => {
+    try {
+      renameGlobalAiTopic(Number(topicId), String(title ?? ''))
+      return { success: true, message: '已重命名' }
+    } catch (error) {
+      return { success: false, message: `重命名失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:global:topic:delete', (_, topicId: number) => {
+    try {
+      deleteGlobalAiTopic(Number(topicId))
+      return { success: true, message: '已删除' }
+    } catch (error) {
+      return { success: false, message: `删除失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:global:messages:list', (_, topicId: number) => {
+    try {
+      return { success: true, data: toSerializable(listGlobalAiMessages(Number(topicId))) }
+    } catch (error) {
+      return { success: false, message: `读取全局消息失败: ${String(error)}`, data: [] }
+    }
+  })
+  ipcMain.handle(
+    'ai:global:messages:append',
+    (_, topicId: number, role: string, content: string, chartJson?: string | null) => {
+      try {
+        const safeRole = role === 'assistant' ? 'assistant' : 'user'
+        appendGlobalAiMessage(Number(topicId), safeRole, String(content ?? ''), chartJson ?? null)
+        return { success: true, message: '已写入' }
+      } catch (error) {
+        return { success: false, message: `写入消息失败: ${String(error)}` }
+      }
+    }
+  )
+  ipcMain.handle('ai:global:current-topic:get', () => {
+    try {
+      return { success: true, data: getGlobalAiCurrentTopicId() }
+    } catch (error) {
+      return { success: false, message: `读取失败: ${String(error)}`, data: null }
+    }
+  })
+  ipcMain.handle('ai:global:current-topic:set', (_, topicId: number | null) => {
+    try {
+      if (topicId != null && Number.isFinite(Number(topicId))) {
+        setGlobalAiCurrentTopicId(Number(topicId))
+      } else {
+        setGlobalAiCurrentTopicId(null)
+      }
+      return { success: true, message: '已保存' }
+    } catch (error) {
+      return { success: false, message: `保存失败: ${String(error)}` }
+    }
+  })
   ipcMain.handle('db:items:list', (_, projectId?: number) => listItems(Number(projectId)))
   ipcMain.handle('db:items:search', (_, keyword: string, projectId?: number) => searchItems(keyword ?? '', Number(projectId)))
   ipcMain.handle('settings:get', () => {
@@ -489,6 +566,7 @@ app.whenReady().then(() => {
         messages?: AiChatMessage[]
         context_node_id?: number | null
         project_id?: number | null
+        global_ai?: boolean
         raw_file_preview?: string
         raw_file_path?: string
       }
@@ -499,6 +577,7 @@ app.whenReady().then(() => {
           payload?.context_node_id ?? undefined,
           {
             projectId: payload?.project_id,
+            globalAi: Boolean(payload?.global_ai),
             rawFilePreview: payload?.raw_file_preview,
             rawFilePath: payload?.raw_file_path
           }

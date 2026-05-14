@@ -24,6 +24,8 @@ export type AiChatMessage = {
 
 export type AiChatOptions = {
   projectId?: number | null
+  /** 全局 AI：不向模型注入项目/库内统计，也不用图谱节点上下文 */
+  globalAi?: boolean
   rawFilePreview?: string
   rawFilePath?: string
 }
@@ -173,14 +175,21 @@ export async function chatWithKnowledgeBase(
     }))
   if (safeMessages.length === 0) throw new Error('消息不能为空')
 
-  const projectId =
-    options?.projectId !== undefined && options?.projectId !== null && Number.isFinite(Number(options.projectId))
+  const isGlobal = Boolean(options?.globalAi)
+
+  const statsProjectId: number | undefined =
+    !isGlobal &&
+    options?.projectId !== undefined &&
+    options?.projectId !== null &&
+    Number.isFinite(Number(options.projectId))
       ? Number(options.projectId)
       : undefined
 
-  const dataStatsBlock = buildAutoStatsSummary(projectId)
+  const dataStatsBlock = isGlobal
+    ? '（全局 AI：对话历史与项目 AI 完全独立；未提供项目内表格统计。适合通用问答、代码与文档类任务。）'
+    : buildAutoStatsSummary(statsProjectId)
   let rawFileBlock = ''
-  if (options?.rawFilePreview?.trim()) {
+  if (!isGlobal && options?.rawFilePreview?.trim()) {
     const prev = options.rawFilePreview.trim()
     rawFileBlock = `
 
@@ -201,7 +210,7 @@ CHART_JSON:{"type":"bar"|"line"|"pie","title":"标题","categories":["类别"],"
 饼图可省略 categories，使用 "names" 与 "values"。`
 
   let contextPrompt = '当前没有选中的图谱节点。你可以回答通用知识库使用问题；涉及具体数据时，请说明需要先选择节点或等待后续 RAG 检索能力。'
-  if (contextNodeId && Number.isFinite(contextNodeId)) {
+  if (!isGlobal && contextNodeId && Number.isFinite(contextNodeId)) {
     const context = getAiNodeContext(contextNodeId)
     const neighborText = context.neighbors.length
       ? context.neighbors.slice(0, 8).map(describeNeighbor).join('\n\n---\n\n')
@@ -215,6 +224,10 @@ ${describeNode(context.core)}
 ${neighborText}`
   }
 
+  const statsSectionLabel = isGlobal
+    ? '【上下文说明】'
+    : '【当前项目结构化数据 — 程序预计算摘要（统计类问题请优先引用此处数字）】'
+
   const completion = await client.chat.completions.create({
     model: config.model,
     temperature: config.temperature,
@@ -225,7 +238,7 @@ ${neighborText}`
 
 ${contextPrompt}
 
-【当前项目结构化数据 — 程序预计算摘要（统计类问题请优先引用此处数字）】
+${statsSectionLabel}
 ${dataStatsBlock}
 ${rawFileBlock}
 ${chartHint}`

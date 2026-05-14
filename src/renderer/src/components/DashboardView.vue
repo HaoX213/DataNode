@@ -635,9 +635,10 @@ defineExpose({
   text-align: center;
 }
 .chart-gallery-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+  align-items: start;
 }
 .chart-dash-card {
   border: 1px solid #e5e7eb;
@@ -684,7 +685,8 @@ defineExpose({
 }
 .chart-sub {
   width: 100%;
-  height: 300px;
+  height: 220px;
+  min-height: 180px;
 }
 .dash-row {
   margin-top: 4px;

@@ -123,6 +123,28 @@ function ensureProjectUiAndAiTables(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_topic_id ON ai_chat_messages(topic_id);
   `)
+  ensureGlobalAiTables(database)
+}
+
+function ensureGlobalAiTables(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS global_ai_chat_topics (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      title         TEXT NOT NULL,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS global_ai_chat_messages (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      topic_id      INTEGER NOT NULL,
+      role          TEXT NOT NULL CHECK(role IN ('user','assistant')),
+      content       TEXT NOT NULL,
+      chart_json    TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (topic_id) REFERENCES global_ai_chat_topics(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_global_ai_chat_messages_topic_id ON global_ai_chat_messages(topic_id);
+  `)
 }
 
 export type DashboardUiPersistV1 = {
@@ -269,7 +291,8 @@ export function saveProjectUiState(projectId: number, state: ProjectUiStateV1): 
 
 export type AiTopicRow = {
   id: number
-  project_id: number
+  /** 项目话题为项目 id；全局 AI 话题为 null */
+  project_id: number | null
   title: string
   created_at: string
   updated_at: string
@@ -299,7 +322,7 @@ export function listAiTopics(projectId: number): AiTopicRow[] {
 
 export function createAiTopic(projectId: number, title: string): number {
   const database = getDb()
-  const normalized = title.trim() || '新话题'
+  const normalized = title.trim() || '新分支'
   const result = database.prepare('INSERT INTO ai_chat_topics (project_id, title) VALUES (?, ?)').run(projectId, normalized)
   return Number(result.lastInsertRowid)
 }
@@ -307,7 +330,7 @@ export function createAiTopic(projectId: number, title: string): number {
 export function renameAiTopic(topicId: number, title: string): void {
   getDb()
     .prepare(`UPDATE ai_chat_topics SET title = ?, updated_at = datetime('now') WHERE id = ?`)
-    .run(title.trim() || '未命名话题', topicId)
+    .run(title.trim() || '未命名分支', topicId)
 }
 
 export function deleteAiTopic(topicId: number): void {
@@ -338,6 +361,93 @@ export function appendAiMessage(
     .prepare('INSERT INTO ai_chat_messages (topic_id, role, content, chart_json) VALUES (?, ?, ?, ?)')
     .run(topicId, role, content, chartJson ?? null)
   database.prepare(`UPDATE ai_chat_topics SET updated_at = datetime('now') WHERE id = ?`).run(topicId)
+}
+
+const GLOBAL_AI_CURRENT_TOPIC_KEY = 'global_ai_current_topic_id'
+
+export function getGlobalAiCurrentTopicId(): number | null {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(GLOBAL_AI_CURRENT_TOPIC_KEY) as
+    | { value: string }
+    | undefined
+  if (!row?.value?.trim()) return null
+  const n = Number(row.value)
+  return Number.isFinite(n) ? n : null
+}
+
+export function setGlobalAiCurrentTopicId(topicId: number | null): void {
+  const database = getDb()
+  if (topicId == null) {
+    database.prepare('DELETE FROM settings WHERE key = ?').run(GLOBAL_AI_CURRENT_TOPIC_KEY)
+  } else {
+    database
+      .prepare(
+        `
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+    `
+      )
+      .run(GLOBAL_AI_CURRENT_TOPIC_KEY, String(topicId))
+  }
+}
+
+export function listGlobalAiTopics(): AiTopicRow[] {
+  return getDb()
+    .prepare(
+      `
+      SELECT id, NULL AS project_id, title, created_at, updated_at
+      FROM global_ai_chat_topics
+      ORDER BY datetime(updated_at) DESC, id DESC
+    `
+    )
+    .all() as AiTopicRow[]
+}
+
+export function createGlobalAiTopic(title: string): number {
+  const database = getDb()
+  const normalized = title.trim() || '新分支'
+  const result = database.prepare('INSERT INTO global_ai_chat_topics (title) VALUES (?)').run(normalized)
+  return Number(result.lastInsertRowid)
+}
+
+export function renameGlobalAiTopic(topicId: number, title: string): void {
+  getDb()
+    .prepare(`UPDATE global_ai_chat_topics SET title = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(title.trim() || '未命名分支', topicId)
+}
+
+export function deleteGlobalAiTopic(topicId: number): void {
+  getDb().prepare('DELETE FROM global_ai_chat_topics WHERE id = ?').run(topicId)
+  const cur = getGlobalAiCurrentTopicId()
+  if (cur === topicId) {
+    setGlobalAiCurrentTopicId(null)
+  }
+}
+
+export function listGlobalAiMessages(topicId: number): AiMessageRow[] {
+  return getDb()
+    .prepare(
+      `
+      SELECT id, topic_id, role, content, chart_json, created_at
+      FROM global_ai_chat_messages
+      WHERE topic_id = ?
+      ORDER BY id ASC
+    `
+    )
+    .all(topicId) as AiMessageRow[]
+}
+
+export function appendGlobalAiMessage(
+  topicId: number,
+  role: 'user' | 'assistant',
+  content: string,
+  chartJson?: string | null
+): void {
+  const database = getDb()
+  database
+    .prepare('INSERT INTO global_ai_chat_messages (topic_id, role, content, chart_json) VALUES (?, ?, ?, ?)')
+    .run(topicId, role, content, chartJson ?? null)
+  database.prepare(`UPDATE global_ai_chat_topics SET updated_at = datetime('now') WHERE id = ?`).run(topicId)
 }
 
 function tableExists(database: Database.Database, tableName: string): boolean {

@@ -115,10 +115,16 @@ function emptyDashboard(): DashboardUiPersistV1 {
   }
 }
 
-const COPILOT_WELCOME: ChatMessage = {
+const COPILOT_WELCOME_PROJECT: ChatMessage = {
   role: 'assistant',
   content:
-    '你好，我是 DataNode 项目内 AI 助手。对话按项目隔离；左侧可创建、切换与管理话题。结合当前项目数据提问，或使用「应用 JSON 入库」。'
+    '你好，我是「项目 AI」助手。对话按项目隔离；左侧可创建与切换**分支**。请结合当前项目数据提问，或使用「应用 JSON 入库」。'
+}
+
+const COPILOT_WELCOME_GLOBAL: ChatMessage = {
+  role: 'assistant',
+  content:
+    '你好，我是「全局 AI」助手。对话不与任何项目绑定，适合通用问答、代码与文档；左侧可管理**全局对话分支**（与项目 AI 历史完全独立）。'
 }
 
 const loading = ref(false)
@@ -150,17 +156,22 @@ const isGraphOpen = computed(() => workspaceTab.value === 'graph')
 const dashboardRef = ref<InstanceType<typeof DashboardView> | null>(null)
 const pendingAiImport = ref<{ preview: string; path: string } | null>(null)
 const copilotVisible = ref(false)
+const copilotMode = ref<'project' | 'global'>('project')
 const copilotMaximized = ref(false)
 const copilotTopicsCollapsed = ref(false)
+function copilotWelcomeMessage(): ChatMessage {
+  return copilotMode.value === 'global' ? COPILOT_WELCOME_GLOBAL : COPILOT_WELCOME_PROJECT
+}
 const savedDashboardState = ref<DashboardUiPersistV1>(emptyDashboard())
 /** undefined：数据库从未写入 chartConfigurations（旧数据），由子组件生成默认卡片 */
 const chartConfigurationsState = ref<ChartCardConfig[] | undefined>(undefined)
 const aiTopics = ref<AiTopicRow[]>([])
 const activeAiTopicId = ref<number | null>(null)
+const activeGlobalAiTopicId = ref<number | null>(null)
 let projectUiPersistTimer: ReturnType<typeof setTimeout> | null = null
 const chatSending = ref(false)
 const chatInput = ref('')
-const chatMessages = ref<ChatMessage[]>([COPILOT_WELCOME])
+const chatMessages = ref<ChatMessage[]>([COPILOT_WELCOME_PROJECT])
 const selectedContextNode = ref<SelectedContextNode | null>(null)
 const settingsForm = ref<AppSettings>({
   ai_api_key: '',
@@ -392,14 +403,24 @@ const drawerTagList = computed(() => {
 })
 
 const copilotContextLabel = computed(() => {
-  if (!selectedContextNode.value) return '当前未选中节点'
+  if (copilotMode.value === 'global') {
+    return '全局 AI：未绑定项目数据与节点上下文'
+  }
+  if (!selectedContextNode.value) return '当前未选中节点（项目 AI）'
   return `已关联当前选中节点：${selectedContextNode.value.title}`
+})
+
+const copilotRailTitle = computed(() => (copilotMode.value === 'global' ? '全局对话' : '分支'))
+
+const copilotModeBadge = computed(() => {
+  if (copilotMode.value === 'global') return '全局 AI'
+  return `项目 AI · ${currentProject.value?.name ?? '—'}`
 })
 
 const copilotLeftPx = computed(() => (sidebarCollapsed.value ? 64 : 240))
 
 function messagesPayloadForApi(): Array<{ role: 'user' | 'assistant'; content: string }> {
-  const w = COPILOT_WELCOME.content
+  const w = copilotWelcomeMessage().content
   return chatMessages.value
     .filter((m) => !(m.role === 'assistant' && m.content === w))
     .map((m) => ({ role: m.role, content: m.content }))
@@ -518,14 +539,48 @@ async function loadAiTopicsForProject(): Promise<void> {
   aiTopics.value = r.success && Array.isArray(r.data) ? r.data : []
 }
 
+async function loadGlobalAiTopics(): Promise<void> {
+  const r = await window.api.listGlobalAiTopics()
+  aiTopics.value = r.success && Array.isArray(r.data) ? r.data : []
+}
+
 async function ensureDefaultAiTopic(): Promise<void> {
   const pid = currentProjectId.value
   if (pid == null) return
   if (aiTopics.value.length) return
-  const r = await window.api.createAiTopic(pid, '默认话题')
+  const r = await window.api.createAiTopic(pid, '默认分支')
   if (r.success && r.data?.id) {
     activeAiTopicId.value = r.data.id
     await loadAiTopicsForProject()
+  }
+}
+
+async function ensureDefaultGlobalTopic(): Promise<void> {
+  if (aiTopics.value.length) return
+  const r = await window.api.createGlobalAiTopic('默认分支')
+  if (r.success && r.data?.id) {
+    activeGlobalAiTopicId.value = r.data.id
+    await window.api.setGlobalAiCurrentTopicId(r.data.id)
+    await loadGlobalAiTopics()
+  }
+}
+
+async function resolveGlobalActiveTopicSelection(): Promise<void> {
+  const id = activeGlobalAiTopicId.value
+  if (id != null && aiTopics.value.some((t) => t.id === id)) return
+  const saved = await window.api.getGlobalAiCurrentTopicId()
+  const sid = saved.success && saved.data != null && Number.isFinite(saved.data) ? saved.data : null
+  if (sid != null && aiTopics.value.some((t) => t.id === sid)) {
+    activeGlobalAiTopicId.value = sid
+    return
+  }
+  activeGlobalAiTopicId.value = aiTopics.value[0]?.id ?? null
+  if (activeGlobalAiTopicId.value == null) {
+    await ensureDefaultGlobalTopic()
+    activeGlobalAiTopicId.value = aiTopics.value[0]?.id ?? null
+  }
+  if (activeGlobalAiTopicId.value != null) {
+    await window.api.setGlobalAiCurrentTopicId(activeGlobalAiTopicId.value)
   }
 }
 
@@ -558,14 +613,33 @@ function mapRowsToChatMessages(rows: AiMessageRow[]): ChatMessage[] {
 }
 
 async function loadMessagesForActiveTopic(): Promise<void> {
+  const welcome = copilotWelcomeMessage()
+  if (copilotMode.value === 'global') {
+    const tid = activeGlobalAiTopicId.value
+    if (tid == null) {
+      chatMessages.value = [welcome]
+      return
+    }
+    const r = await window.api.listGlobalAiMessages(tid)
+    if (!r.success || !r.data?.length) {
+      chatMessages.value = [welcome]
+      await nextTick()
+      return
+    }
+    chatMessages.value = mapRowsToChatMessages(r.data)
+    await nextTick()
+    await repaintCopilotCharts()
+    return
+  }
+
   const tid = activeAiTopicId.value
   if (tid == null) {
-    chatMessages.value = [COPILOT_WELCOME]
+    chatMessages.value = [welcome]
     return
   }
   const r = await window.api.listAiMessages(tid)
   if (!r.success || !r.data?.length) {
-    chatMessages.value = [COPILOT_WELCOME]
+    chatMessages.value = [welcome]
     await nextTick()
     return
   }
@@ -584,6 +658,13 @@ async function repaintCopilotCharts(): Promise<void> {
 }
 
 async function selectAiTopic(topicId: number): Promise<void> {
+  if (copilotMode.value === 'global') {
+    if (activeGlobalAiTopicId.value === topicId) return
+    activeGlobalAiTopicId.value = topicId
+    await window.api.setGlobalAiCurrentTopicId(topicId)
+    await loadMessagesForActiveTopic()
+    return
+  }
   if (activeAiTopicId.value === topicId) return
   activeAiTopicId.value = topicId
   schedulePersistProjectUi()
@@ -591,20 +672,31 @@ async function selectAiTopic(topicId: number): Promise<void> {
 }
 
 async function createAiTopicAction(): Promise<void> {
+  if (copilotMode.value === 'global') {
+    const r = await window.api.createGlobalAiTopic(`新分支 ${aiTopics.value.length + 1}`)
+    if (!r.success || !r.data?.id) {
+      ElMessage.error(r.message || '创建失败')
+      return
+    }
+    await loadGlobalAiTopics()
+    await selectAiTopic(r.data.id)
+    ElMessage.success('已创建分支')
+    return
+  }
   const pid = currentProjectId.value
   if (pid == null) return
-  const r = await window.api.createAiTopic(pid, `新话题 ${aiTopics.value.length + 1}`)
+  const r = await window.api.createAiTopic(pid, `新分支 ${aiTopics.value.length + 1}`)
   if (!r.success || !r.data?.id) {
     ElMessage.error(r.message || '创建失败')
     return
   }
   await loadAiTopicsForProject()
   await selectAiTopic(r.data.id)
-  ElMessage.success('已创建话题')
+  ElMessage.success('已创建分支')
 }
 
 async function renameAiTopicAction(topic: AiTopicRow): Promise<void> {
-  const res = await ElMessageBox.prompt('话题名称', '重命名', {
+  const res = await ElMessageBox.prompt('分支名称', '重命名', {
     confirmButtonText: '保存',
     cancelButtonText: '取消',
     inputValue: topic.title,
@@ -612,6 +704,16 @@ async function renameAiTopicAction(topic: AiTopicRow): Promise<void> {
     inputErrorMessage: '名称不能为空'
   }).catch(() => null)
   if (!res) return
+  if (copilotMode.value === 'global') {
+    const r = await window.api.renameGlobalAiTopic(topic.id, res.value.trim())
+    if (!r.success) {
+      ElMessage.error(r.message || '重命名失败')
+      return
+    }
+    await loadGlobalAiTopics()
+    ElMessage.success('已更新')
+    return
+  }
   const r = await window.api.renameAiTopic(topic.id, res.value.trim())
   if (!r.success) {
     ElMessage.error(r.message || '重命名失败')
@@ -622,12 +724,34 @@ async function renameAiTopicAction(topic: AiTopicRow): Promise<void> {
 }
 
 async function deleteAiTopicAction(topic: AiTopicRow): Promise<void> {
-  const ok = await ElMessageBox.confirm(`确定删除话题「${topic.title}」及其消息？`, '删除话题', {
+  const ok = await ElMessageBox.confirm(`确定删除分支「${topic.title}」及其消息？`, '删除分支', {
     type: 'warning',
     confirmButtonText: '删除',
     cancelButtonText: '取消'
   }).catch(() => false)
   if (!ok) return
+  if (copilotMode.value === 'global') {
+    const r = await window.api.deleteGlobalAiTopic(topic.id)
+    if (!r.success) {
+      ElMessage.error(r.message || '删除失败')
+      return
+    }
+    if (activeGlobalAiTopicId.value === topic.id) {
+      activeGlobalAiTopicId.value = null
+    }
+    await loadGlobalAiTopics()
+    if (aiTopics.value.length === 0) {
+      const cr = await window.api.createGlobalAiTopic('默认分支')
+      if (cr.success && cr.data?.id) {
+        await loadGlobalAiTopics()
+      }
+    }
+    await resolveGlobalActiveTopicSelection()
+    await loadMessagesForActiveTopic()
+    ElMessage.success('已删除')
+    return
+  }
+
   const r = await window.api.deleteAiTopic(topic.id)
   if (!r.success) {
     ElMessage.error(r.message || '删除失败')
@@ -638,7 +762,7 @@ async function deleteAiTopicAction(topic: AiTopicRow): Promise<void> {
   }
   await loadAiTopicsForProject()
   if (aiTopics.value.length === 0 && currentProjectId.value != null) {
-    const cr = await window.api.createAiTopic(currentProjectId.value, '默认话题')
+    const cr = await window.api.createAiTopic(currentProjectId.value, '默认分支')
     if (cr.success && cr.data?.id) {
       await loadAiTopicsForProject()
     }
@@ -650,6 +774,12 @@ async function deleteAiTopicAction(topic: AiTopicRow): Promise<void> {
 }
 
 async function ensureActiveTopicId(): Promise<number | null> {
+  if (copilotMode.value === 'global') {
+    if (activeGlobalAiTopicId.value != null) return activeGlobalAiTopicId.value
+    await loadGlobalAiTopics()
+    await resolveGlobalActiveTopicSelection()
+    return activeGlobalAiTopicId.value
+  }
   const pid = currentProjectId.value
   if (pid == null) return null
   if (activeAiTopicId.value != null) return activeAiTopicId.value
@@ -686,7 +816,7 @@ const switchProject = async (projectId: number): Promise<void> => {
   await runSearch()
   coerceTableFilterForAvailableTypes()
   await loadAllTags()
-  if (copilotVisible.value) {
+  if (copilotVisible.value && copilotMode.value === 'project') {
     await loadAiTopicsForProject()
     await resolveActiveTopicSelection()
     await loadMessagesForActiveTopic()
@@ -1125,6 +1255,7 @@ const importFile = async (): Promise<void> => {
         preview: result.preview ?? '',
         path: result.filePath ?? picked.filePath
       }
+      copilotMode.value = 'project'
       copilotVisible.value = true
       await ElMessageBox.alert(
         '该文件需要结合 AI 理解结构。底部助手已打开并附带文本摘录。请描述列名、分隔规则或期望 JSON；模型给出 ```json 数组后可点击助手内的「应用 JSON 入库」。',
@@ -1794,6 +1925,18 @@ function disposeCopilotCharts(): void {
   copilotChatCharts.clear()
 }
 
+function openProjectCopilot(): void {
+  copilotMode.value = 'project'
+  copilotTopicsCollapsed.value = false
+  copilotVisible.value = true
+}
+
+function openGlobalCopilot(): void {
+  copilotMode.value = 'global'
+  copilotTopicsCollapsed.value = false
+  copilotVisible.value = true
+}
+
 watch(copilotVisible, async (v) => {
   if (!v) {
     disposeCopilotCharts()
@@ -1802,6 +1945,20 @@ watch(copilotVisible, async (v) => {
       await persistCurrentProjectUiState(currentProjectId.value)
     }
     copilotMaximized.value = false
+    return
+  }
+  copilotTopicsCollapsed.value = false
+  if (pendingAiImport.value) {
+    copilotMode.value = 'project'
+  }
+  if (copilotMode.value === 'global') {
+    await loadGlobalAiTopics()
+    const saved = await window.api.getGlobalAiCurrentTopicId()
+    if (saved.success && saved.data != null && Number.isFinite(saved.data)) {
+      activeGlobalAiTopicId.value = saved.data
+    }
+    await resolveGlobalActiveTopicSelection()
+    await loadMessagesForActiveTopic()
     return
   }
   await loadAiTopicsForProject()
@@ -1875,6 +2032,10 @@ function paintCopilotChart(
 }
 
 async function applyAiJsonFromChat(): Promise<void> {
+  if (copilotMode.value === 'global') {
+    ElMessage.warning('JSON 入库需在「项目 AI」中进行，请使用右下角项目助手')
+    return
+  }
   const lastAssistant = [...chatMessages.value].reverse().find((m) => m.role === 'assistant')
   if (!lastAssistant?.content) {
     ElMessage.warning('暂无助手回复可解析')
@@ -1912,14 +2073,21 @@ async function applyAiJsonFromChat(): Promise<void> {
 const sendChatMessage = async (): Promise<void> => {
   const content = chatInput.value.trim()
   if (!content || chatSending.value) return
+  if (copilotMode.value === 'project' && currentProjectId.value == null) {
+    ElMessage.warning('请先选择或创建项目')
+    return
+  }
   const topicId = await ensureActiveTopicId()
   if (topicId == null) {
-    ElMessage.warning('当前无项目，无法对话')
+    ElMessage.warning('无法定位当前分支，请重试')
     return
   }
 
   chatInput.value = ''
-  const userSave = await window.api.appendAiMessage(topicId, 'user', content)
+  const userSave =
+    copilotMode.value === 'global'
+      ? await window.api.appendGlobalAiMessage(topicId, 'user', content)
+      : await window.api.appendAiMessage(topicId, 'user', content)
   if (!userSave.success) {
     ElMessage.error(userSave.message || '保存用户消息失败')
     return
@@ -1931,10 +2099,11 @@ const sendChatMessage = async (): Promise<void> => {
   try {
     const result = await window.api.chatWithAi({
       messages: messagesPayloadForApi(),
-      context_node_id: selectedContextNode.value?.id ?? null,
-      project_id: currentProjectId.value,
-      raw_file_preview: pendingAiImport.value?.preview,
-      raw_file_path: pendingAiImport.value?.path
+      context_node_id: copilotMode.value === 'global' ? null : selectedContextNode.value?.id ?? null,
+      project_id: copilotMode.value === 'global' ? null : currentProjectId.value,
+      global_ai: copilotMode.value === 'global',
+      raw_file_preview: copilotMode.value === 'global' ? undefined : pendingAiImport.value?.preview,
+      raw_file_path: copilotMode.value === 'global' ? undefined : pendingAiImport.value?.path
     })
     if (!result.success) {
       ElMessage.error(result.message || 'AI 对话失败')
@@ -1942,7 +2111,10 @@ const sendChatMessage = async (): Promise<void> => {
     }
     const { text, chart } = splitChartFromAnswer(result.data.answer)
     const chartJson = chart ? JSON.stringify(chart) : null
-    const asstSave = await window.api.appendAiMessage(topicId, 'assistant', text, chartJson)
+    const asstSave =
+      copilotMode.value === 'global'
+        ? await window.api.appendGlobalAiMessage(topicId, 'assistant', text, chartJson)
+        : await window.api.appendAiMessage(topicId, 'assistant', text, chartJson)
     if (!asstSave.success) {
       console.warn(asstSave.message)
     }
@@ -2113,6 +2285,7 @@ onUnmounted(() => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+          <el-button text class="menu-button" @click="openGlobalCopilot">全局 AI</el-button>
           <el-button text class="menu-button" @click="openSettingsDialog">⚙️ 设置</el-button>
         </div>
       </div>
@@ -2268,9 +2441,11 @@ onUnmounted(() => {
     </div>
   </el-dialog>
 
-  <el-button v-if="appReady && !copilotVisible" class="ai-fab" type="primary" @click="copilotVisible = true">
-    <el-icon><MagicStick /></el-icon>
-  </el-button>
+  <el-tooltip v-if="appReady && !copilotVisible" content="项目 AI" placement="left">
+    <el-button class="ai-fab" type="primary" @click="openProjectCopilot">
+      <el-icon><MagicStick /></el-icon>
+    </el-button>
+  </el-tooltip>
 
     <template v-if="copilotVisible">
       <div
@@ -2285,31 +2460,50 @@ onUnmounted(() => {
         @click.stop
       >
         <div class="copilot-sheet-header">
-          <div>
-            <div class="copilot-title">知识库与数据分析 AI</div>
-            <div class="copilot-subtitle">按项目隔离话题与历史 · 可全屏（保留项目栏与话题栏）</div>
+          <div class="copilot-header-text">
+            <div class="copilot-title-row">
+              <div class="copilot-title">知识库与数据分析 AI</div>
+              <el-tag size="small" :type="copilotMode === 'global' ? 'warning' : 'info'" effect="plain" class="copilot-mode-tag">
+                {{ copilotModeBadge }}
+              </el-tag>
+            </div>
+            <div class="copilot-subtitle">项目 AI 按项目隔离分支；全局 AI 独立存储。侧栏可收起，主界面左侧项目栏保持可见。</div>
           </div>
           <div class="copilot-sheet-actions">
-            <el-tooltip :content="copilotTopicsCollapsed ? '展开话题栏' : '收起话题栏'" placement="bottom">
-              <el-button
-                text
-                circle
-                :icon="copilotTopicsCollapsed ? Expand : Fold"
-                @click="copilotTopicsCollapsed = !copilotTopicsCollapsed"
-              />
-            </el-tooltip>
             <el-tooltip :content="copilotMaximized ? '恢复高度' : '最大化显示'" placement="bottom">
               <el-button text circle :icon="FullScreen" @click="copilotMaximized = !copilotMaximized" />
             </el-tooltip>
-            <el-button size="small" type="primary" plain @click="applyAiJsonFromChat">应用 JSON 入库</el-button>
+            <el-button
+              v-if="copilotMode === 'project'"
+              size="small"
+              type="primary"
+              plain
+              @click="applyAiJsonFromChat"
+            >
+              应用 JSON 入库
+            </el-button>
             <el-button circle text :icon="Close" @click="copilotVisible = false" />
           </div>
         </div>
         <div class="copilot-sheet-body">
           <aside v-if="!copilotTopicsCollapsed" class="copilot-topic-rail">
-            <div class="copilot-topic-head">
-              <span>对话话题</span>
-              <el-button text circle :icon="Plus" size="small" @click="createAiTopicAction" />
+            <div class="copilot-topic-head-row">
+              <span>{{ copilotRailTitle }}</span>
+              <el-tooltip content="收起分支栏" placement="left">
+                <el-button text circle size="small" :icon="Fold" @click="copilotTopicsCollapsed = true" />
+              </el-tooltip>
+            </div>
+            <div class="copilot-topic-new-branch">
+              <el-button
+                v-show="copilotMode === 'global' || currentProjectId != null"
+                size="small"
+                type="primary"
+                plain
+                class="copilot-new-branch-btn"
+                @click="createAiTopicAction"
+              >
+                新增分支
+              </el-button>
             </div>
             <el-scrollbar class="copilot-topic-scroll">
               <button
@@ -2317,7 +2511,11 @@ onUnmounted(() => {
                 :key="t.id"
                 type="button"
                 class="copilot-topic-row"
-                :class="{ active: t.id === activeAiTopicId }"
+                :class="{
+                  active:
+                    (copilotMode === 'global' && t.id === activeGlobalAiTopicId) ||
+                    (copilotMode === 'project' && t.id === activeAiTopicId)
+                }"
                 @click="selectAiTopic(t.id)"
               >
                 <span class="copilot-topic-label">{{ t.title }}</span>
@@ -2329,7 +2527,7 @@ onUnmounted(() => {
             </el-scrollbar>
           </aside>
           <div v-else class="copilot-topic-rail-mini">
-            <el-tooltip content="展开话题栏" placement="right">
+            <el-tooltip content="展开分支栏" placement="right">
               <el-button circle :icon="Expand" @click="copilotTopicsCollapsed = false" />
             </el-tooltip>
           </div>
@@ -3005,12 +3203,29 @@ onUnmounted(() => {
 .copilot-sheet-header {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
   border-bottom: 1px solid #eef2f7;
   background: #ffffff;
+}
+
+.copilot-header-text {
+  min-width: 0;
+}
+
+.copilot-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.copilot-mode-tag {
+  flex-shrink: 0;
+  max-width: 100%;
 }
 
 .copilot-sheet-actions {
@@ -3033,6 +3248,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   background: #f9fafb;
+  position: relative;
 }
 
 .copilot-topic-rail-mini {
@@ -3046,14 +3262,23 @@ onUnmounted(() => {
   background: #f9fafb;
 }
 
-.copilot-topic-head {
+.copilot-topic-head-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 10px 12px 6px;
   font-size: 12px;
   font-weight: 650;
   color: #374151;
+}
+
+.copilot-topic-new-branch {
+  padding: 0 12px 10px;
+}
+
+.copilot-new-branch-btn {
+  width: 100%;
 }
 
 .copilot-topic-scroll {
