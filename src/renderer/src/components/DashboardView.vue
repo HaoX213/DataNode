@@ -218,8 +218,6 @@ onBeforeUnmount(() => {
 })
 
 defineExpose({ loadFields, resizeChart, getPersistableDashboard })
-
-defineExpose({ loadFields, resizeChart })
 </script>
 
 <template>
