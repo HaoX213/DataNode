@@ -19,6 +19,8 @@ import type {
   ProjectResult,
   ProjectsResult,
   SettingsResult,
+  StatsQueryPayload,
+  StatsQueryResult,
   TagsResult
 } from './index'
 
@@ -45,6 +47,12 @@ type DataNodeApi = {
   clearItems: (projectId?: number) => Promise<ActionResult>
   pickImportFile: () => Promise<PickImportFileResult>
   importFile: (filePath: string, title?: string, projectId?: number) => Promise<ImportResult>
+  importStructuredJson: (payload: {
+    projectId?: number
+    rows: Record<string, unknown>[]
+    sourceFilePath?: string
+  }) => Promise<ImportResult>
+  statsQuery: (payload: StatsQueryPayload) => Promise<StatsQueryResult>
   getAllTags: (projectId?: number) => Promise<TagsResult>
   getGraphData: (filters?: GraphFilterInput) => Promise<GraphDataResult>
   getLocalGraphData: (nodeId: number, depth?: number, projectId?: number) => Promise<GraphDataResult>
@@ -55,7 +63,13 @@ type DataNodeApi = {
   removeRelation: (relationId: number) => Promise<ActionResult>
   updateNodePositions: (positions: NodePositionInput[]) => Promise<ActionResult>
   summarizeNode: (nodeId: number) => Promise<AiSummaryResult>
-  chatWithAi: (payload: { messages: AiChatMessage[]; context_node_id?: number | null }) => Promise<AiChatResult>
+  chatWithAi: (payload: {
+    messages: AiChatMessage[]
+    context_node_id?: number | null
+    project_id?: number | null
+    raw_file_preview?: string
+    raw_file_path?: string
+  }) => Promise<AiChatResult>
 }
 
 declare global {

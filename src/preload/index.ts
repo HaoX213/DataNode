@@ -22,6 +22,25 @@ export type ImportResult = {
   success: boolean
   message: string
   inserted: number
+  mode?: 'ai_text'
+  preview?: string
+  filePath?: string
+}
+
+export type StatsQueryPayload = {
+  op: string
+  projectId?: number | null
+  field?: string
+  groupField?: string
+  aggregateField?: string
+  aggregateType?: string
+  limit?: number
+}
+
+export type StatsQueryResult = {
+  success: boolean
+  message?: string
+  data?: unknown
 }
 
 export type PickImportFileResult = {
@@ -219,6 +238,12 @@ const api = {
   pickImportFile: (): Promise<PickImportFileResult> => ipcRenderer.invoke('db:items:pick-import-file'),
   importFile: (filePath: string, title?: string, projectId?: number): Promise<ImportResult> =>
     ipcRenderer.invoke('db:items:import', filePath, title, projectId),
+  importStructuredJson: (payload: {
+    projectId?: number
+    rows: Record<string, unknown>[]
+    sourceFilePath?: string
+  }): Promise<ImportResult> => ipcRenderer.invoke('db:items:import-json-array', payload),
+  statsQuery: (payload: StatsQueryPayload): Promise<StatsQueryResult> => ipcRenderer.invoke('stats:query', payload),
   getAllTags: (projectId?: number): Promise<TagsResult> => ipcRenderer.invoke('graph:get-all-tags', projectId),
   getGraphData: (filters?: GraphFilterInput): Promise<GraphDataResult> =>
     ipcRenderer.invoke('graph:get-graph-data', filters),
@@ -236,8 +261,13 @@ const api = {
   updateNodePositions: (positions: NodePositionInput[]): Promise<ActionResult> =>
     ipcRenderer.invoke('graph:update-node-positions', positions),
   summarizeNode: (nodeId: number): Promise<AiSummaryResult> => ipcRenderer.invoke('ai:summarize-node', nodeId),
-  chatWithAi: (payload: { messages: AiChatMessage[]; context_node_id?: number | null }): Promise<AiChatResult> =>
-    ipcRenderer.invoke('ai:chat', payload)
+  chatWithAi: (payload: {
+    messages: AiChatMessage[]
+    context_node_id?: number | null
+    project_id?: number | null
+    raw_file_preview?: string
+    raw_file_path?: string
+  }): Promise<AiChatResult> => ipcRenderer.invoke('ai:chat', payload)
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

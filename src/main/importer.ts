@@ -4,12 +4,16 @@ import { app } from 'electron'
 import * as XLSX from 'xlsx'
 import mammoth from 'mammoth'
 import { appendLog } from './app-log'
-import { getDefaultNotebookId, insertAssetItem, insertDocumentItem, insertExcelRows } from './db'
+import { getDefaultNotebookId, insertAssetItem, insertDocumentItem, insertExcelRows, insertStructuredJsonRows } from './db'
 
 export type ImportResult = {
   success: boolean
   message: string
   inserted: number
+  /** 纯文本等：交给 AI 解析，不写库 */
+  mode?: 'ai_text'
+  preview?: string
+  filePath?: string
 }
 
 const READ_IMPORT_FILE_MESSAGE =
@@ -48,10 +52,152 @@ function normalizeCell(value: unknown): string {
   return String(value).trim()
 }
 
-function isValidHeaderCell(value: string): boolean {
-  if (!value) return false
-  const upper = value.toUpperCase()
-  return !upper.startsWith('__EMPTY')
+function parseCsvLine(line: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let inQ = false
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i]!
+    if (inQ) {
+      if (c === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"'
+          i += 1
+        } else {
+          inQ = false
+        }
+      } else {
+        cur += c
+      }
+    } else if (c === '"') {
+      inQ = true
+    } else if (c === ',') {
+      out.push(cur.trim())
+      cur = ''
+    } else {
+      cur += c
+    }
+  }
+  out.push(cur.trim())
+  return out
+}
+
+export async function importCsvFile(filePath: string, projectId: number): Promise<ImportResult> {
+  let text: string
+  try {
+    const buf = await readFile(path.resolve(filePath))
+    text = buf.toString('utf8').replace(/^\uFEFF/, '')
+  } catch (error) {
+    return {
+      success: false,
+      message: formatReadImportError(error, `CSV 读取失败: ${filePath}`),
+      inserted: 0
+    }
+  }
+
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0)
+  if (lines.length < 2) {
+    return { success: false, message: 'CSV 至少需要表头一行与一行数据', inserted: 0 }
+  }
+
+  const headers = parseCsvLine(lines[0]!).map((h, idx) => normalizeCell(h) || `column_${idx + 1}`)
+  const notebookId = getDefaultNotebookId()
+  const payload: {
+    notebookId: number
+    projectId: number
+    sourceFilePath: string
+    sourceRowIndex: number
+    contentText: string
+    contentJson: string
+  }[] = []
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const cells = parseCsvLine(lines[i]!)
+    const rowObject: Record<string, string> = {}
+    headers.forEach((key, colIndex) => {
+      rowObject[key] = normalizeCell(cells[colIndex] ?? '')
+    })
+    const contentText = Object.values(rowObject).join(' ').trim()
+    if (!contentText) continue
+    payload.push({
+      notebookId,
+      projectId,
+      sourceFilePath: filePath,
+      sourceRowIndex: i + 1,
+      contentText,
+      contentJson: JSON.stringify(rowObject)
+    })
+  }
+
+  if (payload.length === 0) {
+    return { success: false, message: 'CSV 无有效数据行', inserted: 0 }
+  }
+
+  try {
+    const inserted = insertExcelRows(payload)
+    return {
+      success: true,
+      message: `CSV 导入完成：${path.basename(filePath)}，共写入 ${inserted} 行`,
+      inserted
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: formatReadImportError(error, `CSV 写入数据库失败: ${filePath}`),
+      inserted: 0
+    }
+  }
+}
+
+export async function importJsonTableFile(filePath: string, projectId: number): Promise<ImportResult> {
+  let raw: string
+  try {
+    raw = (await readFile(path.resolve(filePath))).toString('utf8').replace(/^\uFEFF/, '')
+  } catch (error) {
+    return {
+      success: false,
+      message: formatReadImportError(error, `JSON 读取失败: ${filePath}`),
+      inserted: 0
+    }
+  }
+
+  let data: unknown
+  try {
+    data = JSON.parse(raw) as unknown
+  } catch {
+    return { success: false, message: 'JSON 格式无效，无法用 AI 以外的方式自动导入', inserted: 0 }
+  }
+
+  let objects: Record<string, unknown>[] = []
+  if (Array.isArray(data)) {
+    objects = data.filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === 'object' && !Array.isArray(x))
+  } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+    objects = [data as Record<string, unknown>]
+  } else {
+    return { success: false, message: 'JSON 须为对象数组或单对象，以便转为表格行', inserted: 0 }
+  }
+
+  if (objects.length === 0) {
+    return { success: false, message: 'JSON 数组为空', inserted: 0 }
+  }
+
+  const n = insertStructuredJsonRows({
+    projectId,
+    sourceFilePath: filePath,
+    rows: objects
+  })
+
+  return {
+    success: true,
+    message: `JSON 导入完成：${path.basename(filePath)}，共写入 ${n} 行`,
+    inserted: n
+  }
+}
+
+export async function readTextFilePreview(filePath: string, maxChars: number): Promise<{ text: string }> {
+  const buf = await readFile(path.resolve(filePath))
+  const text = buf.toString('utf8').replace(/^\uFEFF/, '')
+  return { text: text.length > maxChars ? text.slice(0, maxChars) : text }
 }
 
 export async function importExcelFile(filePath: string, projectId: number): Promise<ImportResult> {
@@ -91,30 +237,16 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
     }
   }
 
-  if (matrix.length === 0) {
-    return { success: false, message: 'Excel 为空，未导入数据', inserted: 0 }
+  if (matrix.length < 2) {
+    return { success: false, message: 'Excel 至少需要表头一行与一行数据', inserted: 0 }
   }
 
-  // 智能寻找表头：选择首个“有效列名数量 >= 2”的行作为表头
-  let headerRowIndex = -1
-  let headers: string[] = []
-  for (let rowIndex = 0; rowIndex < matrix.length; rowIndex += 1) {
-    const row = matrix[rowIndex] ?? []
-    const rowHeaders = row.map((cell, colIndex) => {
-      const normalized = normalizeCell(cell)
-      return isValidHeaderCell(normalized) ? normalized : `column_${colIndex + 1}`
-    })
-    const validHeaderCount = row.map((cell) => normalizeCell(cell)).filter(isValidHeaderCell).length
-    if (validHeaderCount >= 2) {
-      headerRowIndex = rowIndex
-      headers = rowHeaders
-      break
-    }
-  }
-
-  if (headerRowIndex === -1) {
-    return { success: false, message: '未识别到有效表头（至少需要2个有效列名）', inserted: 0 }
-  }
+  // 第一行固定为表头（字段名）
+  const headerRow = matrix[0] ?? []
+  const headers = headerRow.map((cell, colIndex) => {
+    const normalized = normalizeCell(cell)
+    return normalized || `column_${colIndex + 1}`
+  })
 
   const notebookId = getDefaultNotebookId()
   const payload: {
@@ -126,12 +258,11 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
     contentJson: string
   }[] = []
 
-  for (let i = headerRowIndex + 1; i < matrix.length; i += 1) {
+  for (let i = 1; i < matrix.length; i += 1) {
     const row = matrix[i] ?? []
     const rowObject: Record<string, string> = {}
 
     headers.forEach((key, colIndex) => {
-      if (!isValidHeaderCell(key)) return
       rowObject[key] = normalizeCell(row[colIndex])
     })
 
@@ -146,6 +277,10 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
       contentText,
       contentJson: JSON.stringify(rowObject)
     })
+  }
+
+  if (payload.length === 0) {
+    return { success: false, message: 'Excel 无有效数据行（表头以下均为空）', inserted: 0 }
   }
 
   try {

@@ -17,8 +17,10 @@ import {
   getGraphData,
   getLocalGraphData,
   getNodeDetail,
+  getExcelStructuredRowsForStats,
   initDatabase,
   insertNoteItem,
+  insertStructuredJsonRows,
   listItems,
   listNotebooks,
   listProjects,
@@ -32,8 +34,27 @@ import {
   updateNodeDetail,
   updateNodePositions
 } from './db'
-import { importAssetFile, importDocxFile, importExcelFile } from './importer'
+import {
+  importAssetFile,
+  importCsvFile,
+  importDocxFile,
+  importExcelFile,
+  importJsonTableFile,
+  readTextFilePreview
+} from './importer'
 import { chatWithKnowledgeBase, summarizeNodeContext, type AiChatMessage } from './ai'
+import {
+  statsAverage,
+  statsCount,
+  statsGroupBy,
+  statsMax,
+  statsMin,
+  statsSum,
+  statsUniqueValues,
+  inferAllFields,
+  inferNumericFields,
+  type GroupAggregateType
+} from './stats-engine'
 
 function toSerializable<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
@@ -388,11 +409,25 @@ app.whenReady().then(() => {
   })
   ipcMain.handle(
     'ai:chat',
-    async (_, payload: { messages?: AiChatMessage[]; context_node_id?: number | null }) => {
+    async (
+      _,
+      payload: {
+        messages?: AiChatMessage[]
+        context_node_id?: number | null
+        project_id?: number | null
+        raw_file_preview?: string
+        raw_file_path?: string
+      }
+    ) => {
       try {
         const answer = await chatWithKnowledgeBase(
           Array.isArray(payload?.messages) ? payload.messages : [],
-          payload?.context_node_id ?? undefined
+          payload?.context_node_id ?? undefined,
+          {
+            projectId: payload?.project_id,
+            rawFilePreview: payload?.raw_file_preview,
+            rawFilePath: payload?.raw_file_path
+          }
         )
         return { success: true, message: 'AI 回复成功', data: { answer } }
       } catch (error) {
@@ -405,7 +440,10 @@ app.whenReady().then(() => {
     const options: OpenDialogOptions = {
       title: '选择要导入的文件',
       properties: ['openFile'],
-      filters: [{ name: '所有文件', extensions: ['*'] }]
+      filters: [
+        { name: '表格与文档', extensions: ['xlsx', 'xls', 'csv', 'json', 'txt', 'docx'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
     }
     const picked = focusedWindow
       ? await dialog.showOpenDialog(focusedWindow, options)
@@ -440,8 +478,26 @@ app.whenReady().then(() => {
 
     const ext = resolvedSource.toLowerCase()
     try {
+      if (ext.endsWith('.txt')) {
+        const { text } = await readTextFilePreview(resolvedSource, 120000)
+        return {
+          success: true,
+          message:
+            '文本已载入。该格式需要结合 AI 解析字段结构；请在打开的 AI 助手中说明列含义或拆分规则，并可使用「应用 JSON 入库」。',
+          inserted: 0,
+          mode: 'ai_text',
+          preview: text,
+          filePath: resolvedSource
+        }
+      }
       if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
         return await importExcelFile(resolvedSource, Number(projectId))
+      }
+      if (ext.endsWith('.csv')) {
+        return await importCsvFile(resolvedSource, Number(projectId))
+      }
+      if (ext.endsWith('.json')) {
+        return await importJsonTableFile(resolvedSource, Number(projectId))
       }
       if (ext.endsWith('.docx')) {
         return await importDocxFile(resolvedSource, Number(projectId))
@@ -453,6 +509,97 @@ app.whenReady().then(() => {
       return { success: false, message, inserted: 0 }
     }
   })
+
+  ipcMain.handle('db:items:import-json-array', (_, payload: { projectId?: number; rows: Record<string, unknown>[]; sourceFilePath?: string }) => {
+    try {
+      const rows = Array.isArray(payload?.rows) ? payload.rows : []
+      const n = insertStructuredJsonRows({
+        projectId: Number(payload?.projectId),
+        sourceFilePath: payload?.sourceFilePath?.trim() || 'ai-structured.json',
+        rows
+      })
+      return { success: true, message: `已写入 ${n} 行`, inserted: n }
+    } catch (error) {
+      return { success: false, message: String(error), inserted: 0 }
+    }
+  })
+
+  ipcMain.handle(
+    'stats:query',
+    (
+      _,
+      payload: {
+        op?: string
+        projectId?: number | null
+        field?: string
+        groupField?: string
+        aggregateField?: string
+        aggregateType?: string
+        limit?: number
+      }
+    ) => {
+      try {
+        const op = payload?.op ?? ''
+        const pid = Number(payload?.projectId)
+        const projectId = Number.isFinite(pid) ? pid : undefined
+        const rows = getExcelStructuredRowsForStats(projectId, 100000)
+
+        if (op === 'count') {
+          return { success: true, data: { value: statsCount(rows) } }
+        }
+        if (op === 'sum') {
+          return { success: true, data: { value: statsSum(rows, String(payload.field ?? '')) } }
+        }
+        if (op === 'average') {
+          const v = statsAverage(rows, String(payload.field ?? ''))
+          return { success: true, data: { value: v } }
+        }
+        if (op === 'max') {
+          return { success: true, data: { value: statsMax(rows, String(payload.field ?? '')) } }
+        }
+        if (op === 'min') {
+          return { success: true, data: { value: statsMin(rows, String(payload.field ?? '')) } }
+        }
+        if (op === 'uniqueValues') {
+          return {
+            success: true,
+            data: {
+              entries: statsUniqueValues(rows, String(payload.field ?? ''), Math.min(payload?.limit ?? 200, 500))
+            }
+          }
+        }
+        if (op === 'groupBy') {
+          let raw = String(payload.aggregateType ?? 'sum').toLowerCase()
+          if (raw === 'average') raw = 'avg'
+          const safeAgg: GroupAggregateType = raw === 'count' ? 'count' : raw === 'avg' ? 'avg' : 'sum'
+          return {
+            success: true,
+            data: {
+              groups: statsGroupBy(
+                rows,
+                String(payload.groupField ?? ''),
+                String(payload.aggregateField ?? ''),
+                safeAgg
+              )
+            }
+          }
+        }
+        if (op === 'fields') {
+          return {
+            success: true,
+            data: {
+              numericFields: inferNumericFields(rows),
+              allFields: inferAllFields(rows),
+              rowCount: statsCount(rows)
+            }
+          }
+        }
+        return { success: false, message: `未知统计操作: ${op}` }
+      } catch (error) {
+        return { success: false, message: String(error) }
+      }
+    }
+  )
 
   createWindow()
 

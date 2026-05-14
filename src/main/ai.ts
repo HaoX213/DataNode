@@ -1,9 +1,31 @@
 import OpenAI from 'openai'
-import { getAiNodeContext, getAppSettings, type AiContextNeighbor, type AiContextNode } from './db'
+import {
+  countExcelRowsForStats,
+  getAiNodeContext,
+  getAppSettings,
+  getExcelStructuredRowsForStats,
+  type AiContextNeighbor,
+  type AiContextNode
+} from './db'
+import {
+  inferAllFields,
+  inferNumericFields,
+  statsAverage,
+  statsMax,
+  statsMin,
+  statsSum,
+  statsUniqueValues
+} from './stats-engine'
 
 export type AiChatMessage = {
   role: 'user' | 'assistant'
   content: string
+}
+
+export type AiChatOptions = {
+  projectId?: number | null
+  rawFilePreview?: string
+  rawFilePath?: string
 }
 
 type AiConfig = {
@@ -100,7 +122,42 @@ ${neighborText}`
   return content
 }
 
-export async function chatWithKnowledgeBase(messages: AiChatMessage[], contextNodeId?: number): Promise<string> {
+function buildAutoStatsSummary(projectId?: number): string {
+  const totalRows = countExcelRowsForStats(projectId)
+  if (totalRows === 0) {
+    return '（当前项目暂无 excel_row 结构化数据行；可先导入 Excel/CSV/JSON）'
+  }
+  const rows = getExcelStructuredRowsForStats(projectId, 15000)
+  if (rows.length === 0) {
+    return `数据库中标记为 excel_row 共 ${totalRows} 行，但未能解析出有效 JSON 字段（请检查导入数据）。`
+  }
+  const nf = inferNumericFields(rows).slice(0, 8)
+  const allf = inferAllFields(rows).slice(0, 35)
+  const lines: string[] = [
+    `结构化行数（用于摘要计算，最多加载 ${rows.length} 行）: ${rows.length}`,
+    `字段列表: ${allf.join(', ')}`
+  ]
+  for (const f of nf) {
+    const avg = statsAverage(rows, f)
+    lines.push(
+      `${f}: 合计=${statsSum(rows, f)} 平均=${avg === null ? '-' : avg.toFixed(4)} 最大=${statsMax(rows, f) ?? '-'} 最小=${statsMin(rows, f) ?? '-'}`
+    )
+  }
+  const cats = allf.filter((f) => !nf.includes(f)).slice(0, 6)
+  for (const f of cats) {
+    const uv = statsUniqueValues(rows, f, 10)
+    if (uv.length > 0 && uv.length <= 25) {
+      lines.push(`${f} 取值分布(前10): ` + uv.map((u) => `${u.value}×${u.count}`).join(', '))
+    }
+  }
+  return lines.join('\n')
+}
+
+export async function chatWithKnowledgeBase(
+  messages: AiChatMessage[],
+  contextNodeId?: number,
+  options?: AiChatOptions
+): Promise<string> {
   const config = getAiConfig()
   const client = new OpenAI({
     apiKey: config.apiKey.trim(),
@@ -115,6 +172,33 @@ export async function chatWithKnowledgeBase(messages: AiChatMessage[], contextNo
       content: message.content.trim().slice(0, 6000)
     }))
   if (safeMessages.length === 0) throw new Error('消息不能为空')
+
+  const projectId =
+    options?.projectId !== undefined && options?.projectId !== null && Number.isFinite(Number(options.projectId))
+      ? Number(options.projectId)
+      : undefined
+
+  const dataStatsBlock = buildAutoStatsSummary(projectId)
+  let rawFileBlock = ''
+  if (options?.rawFilePreview?.trim()) {
+    const prev = options.rawFilePreview.trim()
+    rawFileBlock = `
+
+【用户刚选择的纯／非表格文本文件（供你理解结构与拆分字段；路径：${options.rawFilePath ?? '未知'}）】
+${prev.slice(0, 10000)}${prev.length > 10000 ? '\n…(已截断)' : ''}
+
+当用户希望「写入数据库」时，请输出**一段**可被解析的 JSON 数组（每元素为扁平对象），并用 markdown 代码块标记为 json，例如：
+\`\`\`json
+[{"列1":"值","列2":"123"}]
+\`\`\`
+用户可使用对话框中的「应用 AI 建议 JSON 入库」将数组写入当前项目。`
+  }
+
+  const chartHint = `
+
+【图表】若适合可视化，在正文之后**另起一行**输出（不要用代码块包裹整段 JSON）：
+CHART_JSON:{"type":"bar"|"line"|"pie","title":"标题","categories":["类别"],"values":[1,2]}
+饼图可省略 categories，使用 "names" 与 "values"。`
 
   let contextPrompt = '当前没有选中的图谱节点。你可以回答通用知识库使用问题；涉及具体数据时，请说明需要先选择节点或等待后续 RAG 检索能力。'
   if (contextNodeId && Number.isFinite(contextNodeId)) {
@@ -137,9 +221,14 @@ ${neighborText}`
     messages: [
       {
         role: 'system',
-        content: `${config.systemPrompt || '你是 DataNode 的全局知识库 AI 助手。请用中文回答，简洁、结构清晰，基于已提供的上下文，不要编造未出现的数据。'}
+        content: `${config.systemPrompt || '你是 DataNode 的全局知识库与数据分析 AI 助手。请用中文回答，简洁、结构清晰，基于已提供的上下文与**程序预计算摘要**，不要编造未出现的数据。'}
 
-${contextPrompt}`
+${contextPrompt}
+
+【当前项目结构化数据 — 程序预计算摘要（统计类问题请优先引用此处数字）】
+${dataStatsBlock}
+${rawFileBlock}
+${chartHint}`
       },
       ...safeMessages
     ]

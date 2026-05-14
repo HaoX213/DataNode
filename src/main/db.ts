@@ -380,6 +380,75 @@ export function insertExcelRows(rows: InsertExcelRowInput[]): number {
   return rows.length
 }
 
+/** 供统计引擎：从 excel_row 解析出结构化对象列表（与导入时 content_json 一致） */
+export function getExcelStructuredRowsForStats(projectId?: number, maxRows = 100000): Record<string, unknown>[] {
+  const database = getDb()
+  const stmt = database.prepare(`
+    SELECT content_json FROM items
+    WHERE type = 'excel_row'
+      AND content_json IS NOT NULL AND TRIM(content_json) != ''
+      AND (@projectId IS NULL OR project_id = @projectId)
+    ORDER BY id ASC
+    LIMIT @maxRows
+  `)
+  const pid = Number.isFinite(projectId as number) ? projectId : null
+  const rows = stmt.all({ projectId: pid, maxRows }) as Array<{ content_json: string }>
+  const out: Record<string, unknown>[] = []
+  for (const r of rows) {
+    try {
+      const parsed = JSON.parse(r.content_json) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        out.push(parsed as Record<string, unknown>)
+      }
+    } catch {
+      /* skip bad json */
+    }
+  }
+  return out
+}
+
+export function countExcelRowsForStats(projectId?: number): number {
+  const database = getDb()
+  const stmt = database.prepare(`
+    SELECT COUNT(*) as c FROM items
+    WHERE type = 'excel_row' AND (@projectId IS NULL OR project_id = @projectId)
+  `)
+  const pid = Number.isFinite(projectId as number) ? projectId : null
+  const row = stmt.get({ projectId: pid }) as { c: number } | undefined
+  return Number(row?.c ?? 0)
+}
+
+/** AI 或「应用 JSON」批量写入，与 Excel 行存储格式一致 */
+export function insertStructuredJsonRows(args: {
+  projectId: number
+  sourceFilePath: string
+  rows: Record<string, unknown>[]
+}): number {
+  if (args.rows.length === 0) return 0
+  const notebookId = getDefaultNotebookId()
+  const defaultProjectId = getDefaultProjectId()
+  const projectId = Number.isFinite(args.projectId) ? args.projectId : defaultProjectId
+  const payload: InsertExcelRowInput[] = []
+  args.rows.forEach((obj, idx) => {
+    const stringRecord: Record<string, string> = {}
+    for (const [k, v] of Object.entries(obj)) {
+      stringRecord[k] = v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '')
+    }
+    const contentText = Object.values(stringRecord).join(' ').trim()
+    if (!contentText) return
+    payload.push({
+      notebookId,
+      projectId,
+      sourceFilePath: args.sourceFilePath,
+      sourceRowIndex: idx + 1,
+      contentText,
+      contentJson: JSON.stringify(stringRecord)
+    })
+  })
+  if (payload.length === 0) return 0
+  return insertExcelRows(payload)
+}
+
 export function insertDocumentItem(args: {
   notebookId: number
   projectId: number

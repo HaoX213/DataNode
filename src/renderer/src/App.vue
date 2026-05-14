@@ -2,9 +2,10 @@
 import * as echarts from 'echarts'
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import DashboardView from './components/DashboardView.vue'
+import RawDataView from './components/RawDataView.vue'
 import {
   Aim,
-  ArrowLeft,
   Close,
   Collection,
   Delete,
@@ -94,6 +95,7 @@ type ProjectRow = {
 type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
+  chartSpec?: Record<string, unknown> | null
 }
 type SelectedContextNode = {
   id: number
@@ -124,6 +126,10 @@ const sidebarCollapsed = ref(false)
 const creatingProject = ref(false)
 const projects = ref<ProjectRow[]>([])
 const currentProjectId = ref<number | null>(null)
+const workspaceTab = ref<'dashboard' | 'raw' | 'graph'>('dashboard')
+const isGraphOpen = computed(() => workspaceTab.value === 'graph')
+const dashboardRef = ref<InstanceType<typeof DashboardView> | null>(null)
+const pendingAiImport = ref<{ preview: string; path: string } | null>(null)
 const copilotVisible = ref(false)
 const chatSending = ref(false)
 const chatInput = ref('')
@@ -145,7 +151,6 @@ const settingsForm = ref<AppSettings>({
 })
 const items = ref<ItemRow[]>([])
 const flattenedRows = ref<FlattenedItemRow[]>([])
-const isGraphOpen = ref(false)
 const activeNodeId = ref<number | null>(null)
 const detailDrawerVisible = ref(false)
 const currentDetailData = ref<Record<string, unknown> | null>(null)
@@ -254,10 +259,16 @@ const dynamicColumns = computed<string[]>(() => {
   return Array.from(keySet)
 })
 
-const isExcelType = (type: unknown): boolean => type === 'excel' || type === 'excel_row'
 const isStructuredImportPath = (filePath: string): boolean => {
   const lower = filePath.toLowerCase()
-  return lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.docx')
+  return (
+    lower.endsWith('.xlsx') ||
+    lower.endsWith('.xls') ||
+    lower.endsWith('.docx') ||
+    lower.endsWith('.csv') ||
+    lower.endsWith('.json') ||
+    lower.endsWith('.txt')
+  )
 }
 
 const availableTypes = computed(() => {
@@ -390,6 +401,7 @@ const flattenRows = (source: ItemRow[]): FlattenedItemRow[] => {
 const applyRows = (source: ItemRow[]): void => {
   items.value = source
   flattenedRows.value = flattenRows(source)
+  void nextTick(() => dashboardRef.value?.loadFields())
 }
 
 const loadProjects = async (): Promise<void> => {
@@ -832,11 +844,40 @@ const importFile = async (): Promise<void> => {
     }
 
     const result = await window.api.importFile(picked.filePath, title, currentProjectId.value ?? undefined)
+
+    if (result.mode === 'ai_text') {
+      pendingAiImport.value = {
+        preview: result.preview ?? '',
+        path: result.filePath ?? picked.filePath
+      }
+      copilotVisible.value = true
+      await ElMessageBox.alert(
+        '该文件需要结合 AI 理解结构。已打开大尺寸 AI 助手并附带文本摘录。请描述列名、分隔规则或期望 JSON；模型给出 ```json 数组后可点击助手内的「应用 JSON 入库」。',
+        'AI 辅助解析',
+        { confirmButtonText: '我知道了' }
+      )
+      chatMessages.value.push({
+        role: 'assistant',
+        content: `已载入文本（${pendingAiImport.value.path}）。请说明如何结构化，或让我直接输出可写入数据库的 JSON 对象数组。`
+      })
+      await scrollChatToBottom()
+      await runSearch()
+      return
+    }
+
     if (!result.success) {
       ElMessage.error(formatImportBackendMessage(result.message || '导入失败'))
       return
     }
     ElMessage.success(result.message)
+    const lower = picked.filePath.toLowerCase()
+    if (/\.(csv|json)$/.test(lower)) {
+      await ElMessageBox.alert(
+        '导入已完成。如需进一步清洗或统计，可在右下角打开 AI 助手提问；复杂排布也可请 AI 输出新的 JSON 再入库。',
+        '提示',
+        { confirmButtonText: '好的' }
+      )
+    }
     await runSearch()
   } catch (error) {
     ElMessage.error(formatImportUiError(error))
@@ -1034,7 +1075,7 @@ const clearFocus = async (): Promise<void> => {
 }
 
 const openGraphPanel = async (): Promise<void> => {
-  isGraphOpen.value = true
+  workspaceTab.value = 'graph'
   await nextTick()
   if (!graphInstance.value) {
     await renderGraphFromApi()
@@ -1474,6 +1515,105 @@ const scrollChatToBottom = async (): Promise<void> => {
   chatMessagesContainer.value.scrollTop = chatMessagesContainer.value.scrollHeight
 }
 
+const copilotChatCharts = new Map<number, echarts.ECharts>()
+
+function disposeCopilotCharts(): void {
+  copilotChatCharts.forEach((c) => c.dispose())
+  copilotChatCharts.clear()
+}
+
+watch(copilotVisible, (v) => {
+  if (!v) {
+    disposeCopilotCharts()
+    pendingAiImport.value = null
+  }
+})
+
+function splitChartFromAnswer(answer: string): { text: string; chart: Record<string, unknown> | null } {
+  const lines = answer.split('\n')
+  const kept: string[] = []
+  let chart: Record<string, unknown> | null = null
+  for (const line of lines) {
+    const t = line.trim()
+    if (t.startsWith('CHART_JSON:')) {
+      try {
+        chart = JSON.parse(t.slice('CHART_JSON:'.length).trim()) as Record<string, unknown>
+      } catch {
+        kept.push(line)
+      }
+    } else {
+      kept.push(line)
+    }
+  }
+  return { text: kept.join('\n').trim(), chart }
+}
+
+function paintCopilotChart(
+  el: Element | null,
+  spec: Record<string, unknown> | null | undefined,
+  index: number
+): void {
+  if (!el || !spec) return
+  copilotChatCharts.get(index)?.dispose()
+  const chart = echarts.init(el as HTMLDivElement)
+  copilotChatCharts.set(index, chart)
+  const type = String(spec.type ?? 'bar')
+  const title = String(spec.title ?? '')
+  const categories = (spec.categories as string[] | undefined) ?? (spec.names as string[] | undefined)
+  const values = spec.values as number[] | undefined
+  if (type === 'pie' && categories && values && categories.length === values.length) {
+    chart.setOption({
+      title: { text: title, left: 'center', textStyle: { fontSize: 13 } },
+      tooltip: { trigger: 'item' },
+      series: [{ type: 'pie', radius: '55%', data: categories.map((n, i) => ({ name: n, value: values[i]! })) }]
+    })
+  } else if (categories && values) {
+    chart.setOption({
+      title: { text: title, textStyle: { fontSize: 13 } },
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: categories, axisLabel: { rotate: 24 } },
+      yAxis: { type: 'value' },
+      series: [{ type: type === 'line' ? 'line' : 'bar', data: values }]
+    })
+  }
+  void nextTick(() => chart.resize())
+}
+
+async function applyAiJsonFromChat(): Promise<void> {
+  const lastAssistant = [...chatMessages.value].reverse().find((m) => m.role === 'assistant')
+  if (!lastAssistant?.content) {
+    ElMessage.warning('暂无助手回复可解析')
+    return
+  }
+  const m = lastAssistant.content.match(/```json\s*([\s\S]*?)\s*```/)
+  if (!m?.[1]) {
+    ElMessage.warning('请让 AI 使用 markdown 代码块输出 ```json ... ``` 对象数组')
+    return
+  }
+  try {
+    const data = JSON.parse(m[1].trim()) as unknown
+    const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : null
+    if (!rows?.length || rows.some((x) => !x || typeof x !== 'object' || Array.isArray(x))) {
+      ElMessage.warning('JSON 须为非空对象数组')
+      return
+    }
+    const res = await window.api.importStructuredJson({
+      projectId: currentProjectId.value ?? undefined,
+      rows,
+      sourceFilePath: pendingAiImport.value?.path ?? 'ai-chat.json'
+    })
+    if (!res.success) {
+      ElMessage.error(res.message || '入库失败')
+      return
+    }
+    ElMessage.success(res.message)
+    pendingAiImport.value = null
+    await runSearch()
+  } catch {
+    ElMessage.error('JSON 解析失败')
+  }
+}
+
 const sendChatMessage = async (): Promise<void> => {
   const content = chatInput.value.trim()
   if (!content || chatSending.value) return
@@ -1486,14 +1626,24 @@ const sendChatMessage = async (): Promise<void> => {
   try {
     const result = await window.api.chatWithAi({
       messages: chatMessages.value.map((message) => ({ role: message.role, content: message.content })),
-      context_node_id: selectedContextNode.value?.id ?? null
+      context_node_id: selectedContextNode.value?.id ?? null,
+      project_id: currentProjectId.value,
+      raw_file_preview: pendingAiImport.value?.preview,
+      raw_file_path: pendingAiImport.value?.path
     })
     if (!result.success) {
       ElMessage.error(result.message || 'AI 对话失败')
       return
     }
-    chatMessages.value.push({ role: 'assistant', content: result.data.answer })
+    const { text, chart } = splitChartFromAnswer(result.data.answer)
+    chatMessages.value.push({ role: 'assistant', content: text, chartSpec: chart })
+    const idx = chatMessages.value.length - 1
     await scrollChatToBottom()
+    await nextTick()
+    if (chart) {
+      const host = chatMessagesContainer.value?.querySelector(`[data-chat-chart="${idx}"]`) ?? null
+      paintCopilotChart(host, chart, idx)
+    }
   } catch (error) {
     ElMessage.error(`AI 对话失败：${String(error)}`)
   } finally {
@@ -1501,8 +1651,8 @@ const sendChatMessage = async (): Promise<void> => {
   }
 }
 
-watch(isGraphOpen, async (open) => {
-  if (open) {
+watch(workspaceTab, async (tab) => {
+  if (tab === 'graph') {
     await nextTick()
     if (!graphInstance.value) {
       await renderGraphFromApi()
@@ -1510,6 +1660,10 @@ watch(isGraphOpen, async (open) => {
       resizeGraph()
       updateGraphHighlight(searchKeyword.value)
     }
+  }
+  if (tab === 'dashboard') {
+    await nextTick()
+    dashboardRef.value?.resizeChart()
   }
 })
 
@@ -1627,7 +1781,7 @@ onUnmounted(() => {
             <el-button text class="menu-button">文件</el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="import" :icon="Upload">导入 Excel</el-dropdown-item>
+                <el-dropdown-item command="import" :icon="Upload">导入数据 (Excel/CSV/JSON/TXT…)</el-dropdown-item>
                 <el-dropdown-item command="import" :icon="FolderOpened">导入文档 / 文件</el-dropdown-item>
                 <el-dropdown-item command="open-data-folder" :icon="FolderOpened">打开数据文件夹</el-dropdown-item>
                 <el-dropdown-item command="note" :icon="DocumentAdd">新建笔记</el-dropdown-item>
@@ -1694,110 +1848,68 @@ onUnmounted(() => {
     </el-header>
 
     <el-main class="content-area">
-      <div class="table-pane">
-        <el-table
-          :data="filteredTableData"
-          stripe
-          v-loading="loading"
-          height="100%"
-          class="modern-table"
-          @row-click="handleTableRowClick"
-        >
-          <el-table-column prop="id" label="ID" width="90" fixed="left" />
-          <el-table-column prop="type" label="类型" width="130" fixed="left" />
-          <el-table-column label="标签" min-width="220" show-overflow-tooltip fixed="left">
-            <template #default="{ row }">
-              <div class="flex flex-wrap gap-1">
-                <el-tag
-                  v-for="tag in nodeTagsMap[row.id] || []"
-                  :key="`${row.id}-${tag.id}`"
-                  size="small"
-                  :style="{ backgroundColor: tag.color, borderColor: tag.color, color: '#fff' }"
-                >
-                  {{ tag.name }}
-                </el-tag>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="内容摘要/名称" min-width="320" show-overflow-tooltip fixed="left">
-            <template #default="{ row }">
-              <span class="text-slate-700">{{ summarizeContent(row) }}</span>
-            </template>
-          </el-table-column>
-          <template v-if="currentTableFilter !== 'all' && currentTableFilter.includes('excel')">
-            <el-table-column
-              v-for="col in dynamicColumns"
-              :key="col"
-              :label="col"
-              min-width="150"
-              show-overflow-tooltip
-            >
-              <template #default="scope">
-                <span v-if="isExcelType(scope.row.type)">{{ scope.row[col] ?? '-' }}</span>
-                <span v-else class="text-slate-300">-</span>
-              </template>
-            </el-table-column>
-          </template>
-          <el-table-column
-            v-if="showMetadata"
-            prop="source_file_path"
-            label="来源文件"
-            min-width="320"
-            fixed="right"
-            show-overflow-tooltip
-          />
-          <el-table-column v-if="showMetadata" prop="created_at" label="创建时间" min-width="220" fixed="right" />
-        </el-table>
-
-      </div>
-
-      <div v-show="isGraphOpen" class="graph-pane">
-        <div class="graph-pane-header">
-          <span>知识图谱</span>
-          <div class="graph-actions">
-            <el-popover placement="bottom-end" width="320" trigger="click">
-              <template #reference>
-                <span>
-                  <el-tooltip content="图谱过滤器" placement="bottom">
-                    <el-button circle :icon="Filter" />
-                  </el-tooltip>
-                </span>
-              </template>
-              <div class="popover-panel">
-                <div class="popover-title">图谱过滤器</div>
-                <el-select v-model="graphTypeFilters" multiple clearable placeholder="按节点类型过滤">
-                  <el-option v-for="type in availableTypes" :key="`graph-type-${type}`" :label="type" :value="type" />
-                </el-select>
-                <el-select v-model="graphTagFilters" multiple clearable filterable placeholder="按标签过滤">
-                  <el-option v-for="tag in allTags" :key="`graph-tag-${tag.id}`" :label="tag.name" :value="tag.name" />
-                </el-select>
-              </div>
-            </el-popover>
-            <el-tooltip content="保存当前布局" placement="bottom">
-              <el-button circle :icon="Collection" :loading="savingLayout" @click="saveGraphLayout" />
-            </el-tooltip>
-            <el-tooltip content="清除高亮 / 退出聚焦" placement="bottom">
-              <el-button circle :icon="Aim" :disabled="!activeNodeId && !isFocusMode" @click="clearFocus" />
-            </el-tooltip>
-            <el-tooltip content="关闭图谱" placement="bottom">
-              <el-button circle :icon="Close" @click="isGraphOpen = false" />
-            </el-tooltip>
+      <el-tabs v-model="workspaceTab" class="workspace-main-tabs" type="border-card">
+        <el-tab-pane label="统计与洞察" name="dashboard" lazy>
+          <DashboardView ref="dashboardRef" :project-id="currentProjectId" @refresh="refreshItems" />
+        </el-tab-pane>
+        <el-tab-pane label="原始数据" name="raw" lazy>
+          <div class="table-pane-inner">
+            <RawDataView
+              :rows="filteredTableData"
+              :loading="loading"
+              :show-metadata="showMetadata"
+              :dynamic-columns="dynamicColumns"
+              :current-table-filter="currentTableFilter"
+              :node-tags-map="nodeTagsMap"
+              :summarize-content="summarizeContent"
+              @row-click="handleTableRowClick"
+            />
           </div>
-        </div>
-        <div class="graph-pane-body">
-          <div v-if="isFocusMode" class="focus-banner">
-            <span>当前处于局部聚焦模式：{{ focusNodeName }}</span>
-            <el-button size="small" text :icon="Close" @click="clearFocus">返回全局</el-button>
+        </el-tab-pane>
+        <el-tab-pane label="知识图谱" name="graph" lazy>
+          <div class="graph-pane graph-pane-embedded">
+            <div class="graph-pane-header">
+              <span>知识图谱</span>
+              <div class="graph-actions">
+                <el-popover placement="bottom-end" width="320" trigger="click">
+                  <template #reference>
+                    <span>
+                      <el-tooltip content="图谱过滤器" placement="bottom">
+                        <el-button circle :icon="Filter" />
+                      </el-tooltip>
+                    </span>
+                  </template>
+                  <div class="popover-panel">
+                    <div class="popover-title">图谱过滤器</div>
+                    <el-select v-model="graphTypeFilters" multiple clearable placeholder="按节点类型过滤">
+                      <el-option v-for="type in availableTypes" :key="`graph-type-${type}`" :label="type" :value="type" />
+                    </el-select>
+                    <el-select v-model="graphTagFilters" multiple clearable filterable placeholder="按标签过滤">
+                      <el-option v-for="tag in allTags" :key="`graph-tag-${tag.id}`" :label="tag.name" :value="tag.name" />
+                    </el-select>
+                  </div>
+                </el-popover>
+                <el-tooltip content="保存当前布局" placement="bottom">
+                  <el-button circle :icon="Collection" :loading="savingLayout" @click="saveGraphLayout" />
+                </el-tooltip>
+                <el-tooltip content="清除高亮 / 退出聚焦" placement="bottom">
+                  <el-button circle :icon="Aim" :disabled="!activeNodeId && !isFocusMode" @click="clearFocus" />
+                </el-tooltip>
+                <el-tooltip content="返回统计" placement="bottom">
+                  <el-button circle :icon="Close" @click="workspaceTab = 'dashboard'" />
+                </el-tooltip>
+              </div>
+            </div>
+            <div class="graph-pane-body">
+              <div v-if="isFocusMode" class="focus-banner">
+                <span>当前处于局部聚焦模式：{{ focusNodeName }}</span>
+                <el-button size="small" text :icon="Close" @click="clearFocus">返回全局</el-button>
+              </div>
+              <div ref="graphContainer" class="graph-canvas graph-canvas-embedded"></div>
+            </div>
           </div>
-          <div ref="graphContainer" class="graph-canvas"></div>
-        </div>
-      </div>
-
-      <el-tooltip v-if="!isGraphOpen" content="展开图谱" placement="left">
-        <button class="toggle-graph-btn" @click="openGraphPanel">
-          <el-icon><ArrowLeft /></el-icon>
-        </button>
-      </el-tooltip>
+        </el-tab-pane>
+      </el-tabs>
     </el-main>
     </el-container>
   </el-container>
@@ -1839,16 +1951,28 @@ onUnmounted(() => {
     <el-icon><MagicStick /></el-icon>
   </el-button>
 
-  <div v-if="appReady && copilotVisible" class="copilot-panel">
-    <div class="copilot-header">
-      <div>
-        <div class="copilot-title">知识库 AI 助手</div>
-        <div class="copilot-subtitle">Global Copilot</div>
+  <el-dialog
+    v-model="copilotVisible"
+    fullscreen
+    :destroy-on-close="false"
+    class="copilot-fullscreen-dialog"
+    :show-close="false"
+    append-to-body
+  >
+    <template #header>
+      <div class="copilot-header copilot-header-bar">
+        <div>
+          <div class="copilot-title">知识库与数据分析 AI</div>
+          <div class="copilot-subtitle">结合当前项目统计摘要与可选文件上下文</div>
+        </div>
+        <div class="copilot-header-actions">
+          <el-button size="small" type="primary" plain @click="applyAiJsonFromChat">应用 JSON 入库</el-button>
+          <el-button circle text :icon="Close" @click="copilotVisible = false" />
+        </div>
       </div>
-      <el-button circle text :icon="Close" @click="copilotVisible = false" />
-    </div>
+    </template>
 
-    <div ref="chatMessagesContainer" class="copilot-messages">
+    <div ref="chatMessagesContainer" class="copilot-messages copilot-messages-full">
       <div
         v-for="(message, index) in chatMessages"
         :key="`chat-${index}`"
@@ -1856,25 +1980,31 @@ onUnmounted(() => {
         :class="message.role === 'user' ? 'is-user' : 'is-ai'"
       >
         <div class="chat-bubble">
-          {{ message.content }}
+          <div class="chat-text-block">{{ message.content }}</div>
+          <div
+            v-if="message.chartSpec"
+            class="copilot-mini-chart"
+            :data-chat-chart="index"
+            style="height: 240px; width: 100%; min-width: 280px"
+          />
         </div>
       </div>
       <div v-if="chatSending" class="typing-hint">AI 正在思考...</div>
     </div>
 
-    <div class="copilot-input-area">
+    <div class="copilot-input-area copilot-input-sticky">
       <div class="context-hint">{{ copilotContextLabel }}</div>
       <div class="chat-input-row">
         <el-input
           v-model="chatInput"
-          placeholder="输入问题，回车发送"
+          placeholder="输入数据分析问题或描述非结构化文本字段…"
           :disabled="chatSending"
           @keyup.enter="sendChatMessage"
         />
         <el-button type="primary" :loading="chatSending" @click="sendChatMessage">发送</el-button>
       </div>
     </div>
-  </div>
+  </el-dialog>
 
   <el-drawer v-model="detailDrawerVisible" size="450px" :with-header="false">
     <div v-if="currentDetailData" class="drawer-container">
@@ -2269,28 +2399,59 @@ onUnmounted(() => {
 
 .content-area {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   padding: 0 !important;
   position: relative;
   height: calc(100vh - 56px);
   overflow: hidden;
 }
 
-.table-pane {
+.workspace-main-tabs {
   flex: 1;
-  height: 100%;
-  overflow: auto;
-  background-color: #ffffff;
-}
-
-.graph-pane {
-  width: 50%;
-  height: 100%;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #e5e7eb;
-  background-color: #fafafa;
-  box-shadow: -4px 0 15px rgba(0, 0, 0, 0.05);
+  min-height: 0;
+  border: none !important;
+}
+
+.workspace-main-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  padding: 0 8px;
+  background: #f8fafc;
+}
+
+.workspace-main-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.workspace-main-tabs :deep(.el-tab-pane) {
+  height: 100%;
+  overflow: auto;
+}
+
+.table-pane-inner {
+  height: calc(100vh - 56px - 42px);
+  min-height: 420px;
+  background: #fff;
+}
+
+.graph-pane-embedded {
+  width: 100%;
+  height: calc(100vh - 56px - 42px);
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+  border: none;
+  box-shadow: none;
+  background: #fafafa;
+}
+
+.graph-canvas-embedded {
+  flex: 1;
+  min-height: 400px;
 }
 
 .graph-pane-header {
@@ -2447,22 +2608,52 @@ onUnmounted(() => {
   box-shadow: 0 18px 38px rgba(37, 99, 235, 0.24) !important;
 }
 
-.copilot-panel {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 1200;
+.copilot-fullscreen-dialog :deep(.el-dialog) {
   display: flex;
-  width: 360px;
-  height: 520px;
-  overflow: hidden;
   flex-direction: column;
-  border: 1px solid #e5e7eb;
-  border-radius: 18px;
-  background: #ffffff;
-  box-shadow:
-    0 24px 60px rgba(15, 23, 42, 0.16),
-    0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  margin: 0 !important;
+  height: 100vh;
+  max-height: 100vh;
+  border-radius: 0;
+}
+
+.copilot-fullscreen-dialog :deep(.el-dialog__header) {
+  margin: 0;
+  padding: 0 8px 0 0;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.copilot-fullscreen-dialog :deep(.el-dialog__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 0 !important;
+  overflow: hidden;
+  min-height: 0;
+  height: calc(100vh - 120px);
+}
+
+.copilot-header-bar {
+  width: 100%;
+}
+
+.copilot-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.copilot-messages-full {
+  max-height: none;
+  min-height: 0;
+}
+
+.copilot-input-sticky {
+  flex-shrink: 0;
+}
+
+.chat-text-block {
+  white-space: pre-wrap;
 }
 
 .copilot-header {
