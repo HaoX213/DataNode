@@ -30,6 +30,8 @@ export type ImportResult = {
 export type StatsQueryPayload = {
   op: string
   projectId?: number | null
+  /** 多项目合并（传给统计引擎时会合并 excel_row 并打上 _DataNodeProjectId） */
+  projectIds?: number[] | null
   field?: string
   groupField?: string
   aggregateField?: string
@@ -180,6 +182,8 @@ export type DashboardUiPersistV1 = {
   aggregateType: 'sum' | 'avg' | 'count'
 }
 
+export type ChartLegendPosition = 'top' | 'bottom' | 'left' | 'right'
+
 /** 仪表盘可拖拽图表卡片（ECharts） */
 export type ChartCardKind = 'category_pie' | 'group_bar'
 
@@ -191,6 +195,14 @@ export type ChartCardConfig = {
   groupField?: string
   aggregateField?: string
   aggregateType?: 'sum' | 'avg' | 'count'
+  /** 分类图：pie | bar；分组图：bar | line */
+  chartStyle?: 'pie' | 'bar' | 'line'
+  xAxisName?: string
+  yAxisName?: string
+  color?: string
+  legendPosition?: ChartLegendPosition
+  cardWidthPx?: number
+  chartHeightPx?: number
 }
 
 export type ProjectUiStateV1 = {
@@ -250,6 +262,12 @@ export type GlobalAiCurrentTopicResult = {
   success: boolean
   message?: string
   data: number | null
+}
+
+export type GlobalAiLinkedProjectsResult = {
+  success: boolean
+  message?: string
+  data: number[]
 }
 
 export type AiChatResult = {
@@ -346,6 +364,7 @@ const api = {
     context_node_id?: number | null
     project_id?: number | null
     global_ai?: boolean
+    linked_project_ids?: number[]
     raw_file_preview?: string
     raw_file_path?: string
   }): Promise<AiChatResult> => ipcRenderer.invoke('ai:chat', payload),
@@ -384,7 +403,11 @@ const api = {
   getGlobalAiCurrentTopicId: (): Promise<GlobalAiCurrentTopicResult> =>
     ipcRenderer.invoke('ai:global:current-topic:get'),
   setGlobalAiCurrentTopicId: (topicId: number | null): Promise<ActionResult> =>
-    ipcRenderer.invoke('ai:global:current-topic:set', topicId)
+    ipcRenderer.invoke('ai:global:current-topic:set', topicId),
+  getGlobalAiLinkedProjectIds: (): Promise<GlobalAiLinkedProjectsResult> =>
+    ipcRenderer.invoke('ai:global:linked-projects:get'),
+  setGlobalAiLinkedProjectIds: (projectIds: number[]): Promise<ActionResult> =>
+    ipcRenderer.invoke('ai:global:linked-projects:set', projectIds)
 }
 
 export type AppApi = typeof api

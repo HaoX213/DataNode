@@ -157,6 +157,8 @@ export type DashboardUiPersistV1 = {
 
 export type ChartCardKind = 'category_pie' | 'group_bar'
 
+export type ChartLegendPosition = 'top' | 'bottom' | 'left' | 'right'
+
 export type ChartCardConfig = {
   id: string
   kind: ChartCardKind
@@ -165,6 +167,14 @@ export type ChartCardConfig = {
   groupField?: string
   aggregateField?: string
   aggregateType?: 'sum' | 'avg' | 'count'
+  /** 分类图：pie | bar；分组图：bar | line */
+  chartStyle?: 'pie' | 'bar' | 'line'
+  xAxisName?: string
+  yAxisName?: string
+  color?: string
+  legendPosition?: ChartLegendPosition
+  cardWidthPx?: number
+  chartHeightPx?: number
 }
 
 export type ProjectUiStateV1 = {
@@ -192,6 +202,20 @@ function parseChartConfigurations(input: unknown): ChartCardConfig[] | undefined
     const aggRaw = String(o.aggregateType ?? 'sum').toLowerCase()
     const aggregateType: ChartCardConfig['aggregateType'] =
       aggRaw === 'avg' || aggRaw === 'average' ? 'avg' : aggRaw === 'count' ? 'count' : 'sum'
+    const cs = typeof o.chartStyle === 'string' ? o.chartStyle.toLowerCase() : ''
+    const chartStyle: ChartCardConfig['chartStyle'] =
+      cs === 'pie' || cs === 'bar' || cs === 'line' ? (cs as 'pie' | 'bar' | 'line') : undefined
+    const lp = typeof o.legendPosition === 'string' ? o.legendPosition.toLowerCase() : ''
+    const legendPosition: ChartCardConfig['legendPosition'] =
+      lp === 'top' || lp === 'bottom' || lp === 'left' || lp === 'right' ? (lp as ChartLegendPosition) : undefined
+    const cardWidthPx =
+      typeof o.cardWidthPx === 'number' && Number.isFinite(o.cardWidthPx)
+        ? Math.min(900, Math.max(200, Math.round(o.cardWidthPx)))
+        : undefined
+    const chartHeightPx =
+      typeof o.chartHeightPx === 'number' && Number.isFinite(o.chartHeightPx)
+        ? Math.min(800, Math.max(120, Math.round(o.chartHeightPx)))
+        : undefined
     out.push({
       id,
       kind,
@@ -199,7 +223,14 @@ function parseChartConfigurations(input: unknown): ChartCardConfig[] | undefined
       catField: typeof o.catField === 'string' ? o.catField : undefined,
       groupField: typeof o.groupField === 'string' ? o.groupField : undefined,
       aggregateField: typeof o.aggregateField === 'string' ? o.aggregateField : undefined,
-      aggregateType
+      aggregateType,
+      chartStyle,
+      xAxisName: typeof o.xAxisName === 'string' ? o.xAxisName : undefined,
+      yAxisName: typeof o.yAxisName === 'string' ? o.yAxisName : undefined,
+      color: typeof o.color === 'string' ? o.color : undefined,
+      legendPosition,
+      cardWidthPx,
+      chartHeightPx
     })
   }
   return out
@@ -388,6 +419,40 @@ export function setGlobalAiCurrentTopicId(topicId: number | null): void {
     `
       )
       .run(GLOBAL_AI_CURRENT_TOPIC_KEY, String(topicId))
+  }
+}
+
+const GLOBAL_AI_LINKED_PROJECTS_KEY = 'global_ai_linked_project_ids'
+
+export function getGlobalAiLinkedProjectIds(): number[] {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(GLOBAL_AI_LINKED_PROJECTS_KEY) as
+    | { value: string }
+    | undefined
+  if (!row?.value?.trim()) return []
+  try {
+    const parsed = JSON.parse(row.value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return [...new Set(parsed.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))]
+  } catch {
+    return []
+  }
+}
+
+export function setGlobalAiLinkedProjectIds(projectIds: number[]): void {
+  const uniq = [...new Set(projectIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  const database = getDb()
+  if (uniq.length === 0) {
+    database.prepare('DELETE FROM settings WHERE key = ?').run(GLOBAL_AI_LINKED_PROJECTS_KEY)
+  } else {
+    database
+      .prepare(
+        `
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+    `
+      )
+      .run(GLOBAL_AI_LINKED_PROJECTS_KEY, JSON.stringify(uniq))
   }
 }
 
@@ -760,6 +825,22 @@ export function getExcelStructuredRowsForStats(projectId?: number, maxRows = 100
       }
     } catch {
       /* skip bad json */
+    }
+  }
+  return out
+}
+
+/** 合并多个项目的结构化行，并注入 _DataNodeProjectId 供跨项目统计 / 全局 AI */
+export function getMergedExcelStructuredRowsForProjects(
+  projectIds: number[],
+  maxRowsPerProject = 40000
+): Record<string, unknown>[] {
+  const ids = [...new Set(projectIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  const out: Record<string, unknown>[] = []
+  for (const pid of ids) {
+    const rows = getExcelStructuredRowsForStats(pid, maxRowsPerProject)
+    for (const row of rows) {
+      out.push({ ...row, _DataNodeProjectId: pid })
     }
   }
   return out

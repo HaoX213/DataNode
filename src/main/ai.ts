@@ -4,6 +4,8 @@ import {
   getAiNodeContext,
   getAppSettings,
   getExcelStructuredRowsForStats,
+  getMergedExcelStructuredRowsForProjects,
+  listProjects,
   type AiContextNeighbor,
   type AiContextNode
 } from './db'
@@ -26,6 +28,8 @@ export type AiChatOptions = {
   projectId?: number | null
   /** 全局 AI：不向模型注入项目/库内统计，也不用图谱节点上下文 */
   globalAi?: boolean
+  /** 全局 AI：勾选的要并入统计上下文的项目 id（跨项目分析） */
+  linkedProjectIds?: number[]
   rawFilePreview?: string
   rawFilePath?: string
 }
@@ -155,6 +159,56 @@ function buildAutoStatsSummary(projectId?: number): string {
   return lines.join('\n')
 }
 
+function stripMetaFields(keys: string[]): string[] {
+  return keys.filter((k) => !k.startsWith('_DataNode'))
+}
+
+function buildMultiProjectStatsSummary(projectIds: number[]): string {
+  const ids = [...new Set(projectIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))]
+  if (ids.length === 0) return '（关联项目列表为空。）'
+  const projects = listProjects().filter((p) => ids.includes(p.id))
+  const nameById = new Map(projects.map((p) => [p.id, p.name]))
+  const lines: string[] = [
+    `关联项目：${ids.map((id) => `${nameById.get(id) ?? `项目${id}`}(id=${id})`).join('、')}`,
+    '合并样本中每行带有系统字段 _DataNodeProjectId（来源项目 id），可按项目拆分或对比。'
+  ]
+  const merged = getMergedExcelStructuredRowsForProjects(ids, 12000)
+  if (merged.length === 0) {
+    for (const id of ids) {
+      const c = countExcelRowsForStats(id)
+      lines.push(`— ${nameById.get(id) ?? id}：excel_row 行数约 ${c}（可解析为结构化对象的采样为 0）`)
+    }
+    return lines.join('\n')
+  }
+  const allf = stripMetaFields(inferAllFields(merged)).slice(0, 40)
+  const nf = stripMetaFields(inferNumericFields(merged)).slice(0, 10)
+  lines.push(`合并采样行数: ${merged.length}`)
+  const counts = new Map<number, number>()
+  for (const row of merged) {
+    const raw = row._DataNodeProjectId
+    const n = typeof raw === 'number' ? raw : Number(raw)
+    if (Number.isFinite(n)) counts.set(n, (counts.get(n) ?? 0) + 1)
+  }
+  for (const id of ids) {
+    lines.push(`  — 样本中来自 ${nameById.get(id) ?? id}(id=${id})：${counts.get(id) ?? 0} 行`)
+  }
+  lines.push(`字段列表（已排除 _DataNode 系统前缀）: ${allf.join(', ') || '—'}`)
+  for (const f of nf) {
+    const avg = statsAverage(merged, f)
+    lines.push(
+      `${f}: 合计=${statsSum(merged, f)} 平均=${avg === null ? '-' : avg.toFixed(4)} 最大=${statsMax(merged, f) ?? '-'} 最小=${statsMin(merged, f) ?? '-'}`
+    )
+  }
+  const cats = allf.filter((f) => !nf.includes(f)).slice(0, 6)
+  for (const f of cats) {
+    const uv = statsUniqueValues(merged, f, 10)
+    if (uv.length > 0 && uv.length <= 25) {
+      lines.push(`${f} 取值分布(前10): ` + uv.map((u) => `${u.value}×${u.count}`).join(', '))
+    }
+  }
+  return lines.join('\n')
+}
+
 export async function chatWithKnowledgeBase(
   messages: AiChatMessage[],
   contextNodeId?: number,
@@ -176,6 +230,10 @@ export async function chatWithKnowledgeBase(
   if (safeMessages.length === 0) throw new Error('消息不能为空')
 
   const isGlobal = Boolean(options?.globalAi)
+  const linkedIds =
+    isGlobal && Array.isArray(options?.linkedProjectIds) && options.linkedProjectIds.length > 0
+      ? [...new Set(options.linkedProjectIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+      : []
 
   const statsProjectId: number | undefined =
     !isGlobal &&
@@ -186,7 +244,9 @@ export async function chatWithKnowledgeBase(
       : undefined
 
   const dataStatsBlock = isGlobal
-    ? '（全局 AI：对话历史与项目 AI 完全独立；未提供项目内表格统计。适合通用问答、代码与文档类任务。）'
+    ? linkedIds.length > 0
+      ? buildMultiProjectStatsSummary(linkedIds)
+      : '（全局 AI：未勾选「关联项目」时不注入项目表格统计；可在左侧勾选项目以进行跨项目对比、汇总与趋势分析。）'
     : buildAutoStatsSummary(statsProjectId)
   let rawFileBlock = ''
   if (!isGlobal && options?.rawFilePreview?.trim()) {
@@ -225,7 +285,9 @@ ${neighborText}`
   }
 
   const statsSectionLabel = isGlobal
-    ? '【上下文说明】'
+    ? linkedIds.length > 0
+      ? '【跨项目结构化数据 — 程序预计算摘要（统计类问题请优先引用此处数字）】'
+      : '【上下文说明】'
     : '【当前项目结构化数据 — 程序预计算摘要（统计类问题请优先引用此处数字）】'
 
   const completion = await client.chat.completions.create({

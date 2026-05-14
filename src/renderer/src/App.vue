@@ -168,6 +168,8 @@ const chartConfigurationsState = ref<ChartCardConfig[] | undefined>(undefined)
 const aiTopics = ref<AiTopicRow[]>([])
 const activeAiTopicId = ref<number | null>(null)
 const activeGlobalAiTopicId = ref<number | null>(null)
+const globalLinkedProjectIds = ref<number[]>([])
+let globalLinkedPersistTimer: ReturnType<typeof setTimeout> | null = null
 let projectUiPersistTimer: ReturnType<typeof setTimeout> | null = null
 const chatSending = ref(false)
 const chatInput = ref('')
@@ -404,7 +406,11 @@ const drawerTagList = computed(() => {
 
 const copilotContextLabel = computed(() => {
   if (copilotMode.value === 'global') {
-    return '全局 AI：未绑定项目数据与节点上下文'
+    const n = globalLinkedProjectIds.value.length
+    if (n > 0) {
+      return `全局 AI：已合并 ${n} 个关联项目的结构化数据；不使用图谱节点上下文。`
+    }
+    return '全局 AI：未绑定关联项目数据与节点上下文'
   }
   if (!selectedContextNode.value) return '当前未选中节点（项目 AI）'
   return `已关联当前选中节点：${selectedContextNode.value.title}`
@@ -413,9 +419,37 @@ const copilotContextLabel = computed(() => {
 const copilotRailTitle = computed(() => (copilotMode.value === 'global' ? '全局对话' : '分支'))
 
 const copilotModeBadge = computed(() => {
-  if (copilotMode.value === 'global') return '全局 AI'
+  if (copilotMode.value === 'global') {
+    const ids = globalLinkedProjectIds.value
+    if (!ids.length) return '全局 AI'
+    const names = ids
+      .map((id) => projects.value.find((p) => p.id === id)?.name)
+      .filter((n): n is string => Boolean(n))
+      .slice(0, 5)
+    const tail = ids.length > 5 ? ` 等 ${ids.length} 个` : ''
+    return `全局 AI (关联: ${names.join('、')}${tail})`
+  }
   return `项目 AI · ${currentProject.value?.name ?? '—'}`
 })
+
+async function loadGlobalLinkedProjectsFromDb(): Promise<void> {
+  const r = await window.api.getGlobalAiLinkedProjectIds()
+  if (r.success && Array.isArray(r.data)) {
+    globalLinkedProjectIds.value = r.data
+  }
+}
+
+function schedulePersistGlobalLinkedProjects(): void {
+  if (globalLinkedPersistTimer) clearTimeout(globalLinkedPersistTimer)
+  globalLinkedPersistTimer = setTimeout(() => {
+    globalLinkedPersistTimer = null
+    void window.api.setGlobalAiLinkedProjectIds(globalLinkedProjectIds.value)
+  }, 400)
+}
+
+function onGlobalLinkedProjectsChange(): void {
+  schedulePersistGlobalLinkedProjects()
+}
 
 const copilotLeftPx = computed(() => (sidebarCollapsed.value ? 64 : 240))
 
@@ -861,6 +895,8 @@ const removeProject = async (projectId: number): Promise<void> => {
     return
   }
   await loadProjects()
+  globalLinkedProjectIds.value = globalLinkedProjectIds.value.filter((id) => id !== projectId)
+  await window.api.setGlobalAiLinkedProjectIds(globalLinkedProjectIds.value)
   if (currentProjectId.value != null) {
     await loadProjectUiFromDb(currentProjectId.value)
   }
@@ -1037,6 +1073,7 @@ const loadStoragePath = (): void => {
 
 const loadInitialData = async (): Promise<void> => {
   await loadProjects()
+  await loadGlobalLinkedProjectsFromDb()
   const pid = currentProjectId.value
   if (pid != null) {
     await loadProjectUiFromDb(pid)
@@ -2102,6 +2139,7 @@ const sendChatMessage = async (): Promise<void> => {
       context_node_id: copilotMode.value === 'global' ? null : selectedContextNode.value?.id ?? null,
       project_id: copilotMode.value === 'global' ? null : currentProjectId.value,
       global_ai: copilotMode.value === 'global',
+      linked_project_ids: copilotMode.value === 'global' ? [...globalLinkedProjectIds.value] : undefined,
       raw_file_preview: copilotMode.value === 'global' ? undefined : pendingAiImport.value?.preview,
       raw_file_path: copilotMode.value === 'global' ? undefined : pendingAiImport.value?.path
     })
@@ -2487,8 +2525,28 @@ onUnmounted(() => {
         </div>
         <div class="copilot-sheet-body">
           <aside v-if="!copilotTopicsCollapsed" class="copilot-topic-rail">
+            <template v-if="copilotMode === 'global'">
+              <div class="global-ai-linked-block">
+                <div class="copilot-section-title">关联项目</div>
+                <el-select
+                  v-model="globalLinkedProjectIds"
+                  multiple
+                  collapse-tags
+                  :max-collapse-tags="2"
+                  placeholder="多选项目，合并表格分析"
+                  class="global-linked-project-select"
+                  @change="onGlobalLinkedProjectsChange"
+                >
+                  <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+                </el-select>
+                <p class="global-ai-linked-hint">
+                  将所选项目的 excel_row 合并注入上下文（含 _DataNodeProjectId），可进行跨项目对比与排行类问答。
+                </p>
+                <div class="copilot-section-title copilot-section-title--sub">全局对话历史</div>
+              </div>
+            </template>
             <div class="copilot-topic-head-row">
-              <span>{{ copilotRailTitle }}</span>
+              <span>{{ copilotMode === 'global' ? '对话分支' : copilotRailTitle }}</span>
               <el-tooltip content="收起分支栏" placement="left">
                 <el-button text circle size="small" :icon="Fold" @click="copilotTopicsCollapsed = true" />
               </el-tooltip>
@@ -3249,6 +3307,37 @@ onUnmounted(() => {
   flex-direction: column;
   background: #f9fafb;
   position: relative;
+}
+
+.global-ai-linked-block {
+  padding: 10px 12px 4px;
+  border-bottom: 1px solid #eef2f7;
+  background: #fafafa;
+}
+
+.copilot-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+.copilot-section-title--sub {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+.global-linked-project-select {
+  width: 100%;
+}
+
+.global-ai-linked-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #94a3b8;
 }
 
 .copilot-topic-rail-mini {

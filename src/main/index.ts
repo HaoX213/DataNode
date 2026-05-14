@@ -18,6 +18,7 @@ import {
   getLocalGraphData,
   getNodeDetail,
   getExcelStructuredRowsForStats,
+  getMergedExcelStructuredRowsForProjects,
   initDatabase,
   insertNoteItem,
   insertStructuredJsonRows,
@@ -40,6 +41,8 @@ import {
   appendGlobalAiMessage,
   getGlobalAiCurrentTopicId,
   setGlobalAiCurrentTopicId,
+  getGlobalAiLinkedProjectIds,
+  setGlobalAiLinkedProjectIds,
   removeRelation,
   removeTagFromNode,
   getNodeEdges,
@@ -353,6 +356,24 @@ app.whenReady().then(() => {
       return { success: false, message: `保存失败: ${String(error)}` }
     }
   })
+  ipcMain.handle('ai:global:linked-projects:get', () => {
+    try {
+      return { success: true, data: getGlobalAiLinkedProjectIds() }
+    } catch (error) {
+      return { success: false, message: `读取失败: ${String(error)}`, data: [] }
+    }
+  })
+  ipcMain.handle('ai:global:linked-projects:set', (_, projectIds: number[]) => {
+    try {
+      const ids = Array.isArray(projectIds)
+        ? [...new Set(projectIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+        : []
+      setGlobalAiLinkedProjectIds(ids)
+      return { success: true, message: '已保存', data: ids }
+    } catch (error) {
+      return { success: false, message: `保存失败: ${String(error)}` }
+    }
+  })
   ipcMain.handle('db:items:list', (_, projectId?: number) => listItems(Number(projectId)))
   ipcMain.handle('db:items:search', (_, keyword: string, projectId?: number) => searchItems(keyword ?? '', Number(projectId)))
   ipcMain.handle('settings:get', () => {
@@ -567,17 +588,23 @@ app.whenReady().then(() => {
         context_node_id?: number | null
         project_id?: number | null
         global_ai?: boolean
+        linked_project_ids?: number[]
         raw_file_preview?: string
         raw_file_path?: string
       }
     ) => {
       try {
+        const rawLinked = payload?.linked_project_ids
+        const linkedProjectIds = Array.isArray(rawLinked)
+          ? [...new Set(rawLinked.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+          : []
         const answer = await chatWithKnowledgeBase(
           Array.isArray(payload?.messages) ? payload.messages : [],
           payload?.context_node_id ?? undefined,
           {
             projectId: payload?.project_id,
             globalAi: Boolean(payload?.global_ai),
+            linkedProjectIds: linkedProjectIds.length ? linkedProjectIds : undefined,
             rawFilePreview: payload?.raw_file_preview,
             rawFilePath: payload?.raw_file_path
           }
@@ -684,6 +711,8 @@ app.whenReady().then(() => {
       payload: {
         op?: string
         projectId?: number | null
+        /** 多项目合并统计（优先于单 projectId） */
+        projectIds?: number[] | null
         field?: string
         groupField?: string
         aggregateField?: string
@@ -695,7 +724,15 @@ app.whenReady().then(() => {
         const op = payload?.op ?? ''
         const pid = Number(payload?.projectId)
         const projectId = Number.isFinite(pid) ? pid : undefined
-        const rows = getExcelStructuredRowsForStats(projectId, 100000)
+        const rawMulti = payload?.projectIds
+        const multiIds =
+          Array.isArray(rawMulti) && rawMulti.length > 0
+            ? [...new Set(rawMulti.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+            : null
+        const rows =
+          multiIds && multiIds.length > 0
+            ? getMergedExcelStructuredRowsForProjects(multiIds, 100000)
+            : getExcelStructuredRowsForStats(projectId, 100000)
 
         if (op === 'count') {
           return { success: true, data: { value: statsCount(rows) } }

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
-import { Rank, Plus, Delete } from '@element-plus/icons-vue'
+import { Rank, Plus, Delete, EditPen } from '@element-plus/icons-vue'
 import { markRaw, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import type { ChartCardConfig, ChartCardKind, DashboardUiPersistV1 } from '../../../preload/index'
+import type { ChartCardConfig, ChartCardKind, ChartLegendPosition, DashboardUiPersistV1 } from '../../../preload/index'
 
 const props = defineProps<{
   projectId: number | null
@@ -30,6 +30,19 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null
 let cardRefreshTimer: ReturnType<typeof setTimeout> | null = null
 const draggingCardIndex = ref<number | null>(null)
 
+const chartEditorVisible = ref(false)
+const chartEditorForm = ref<ChartCardConfig | null>(null)
+
+const CARD_W_DEF = 400
+const CARD_H_DEF = 280
+const CARD_W_MIN = 280
+const CARD_W_MAX = 720
+const CARD_H_MIN = 160
+const CARD_H_MAX = 560
+
+type ResizeState = { cardId: string; startX: number; startY: number; startW: number; startH: number }
+let resizeState: ResizeState | null = null
+
 function genId(): string {
   return `c_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
 }
@@ -37,35 +50,76 @@ function genId(): string {
 function defaultCardsFromDashboard(d: DashboardUiPersistV1): ChartCardConfig[] {
   const agg = d.aggregateType === 'avg' || d.aggregateType === 'count' ? d.aggregateType : 'sum'
   return [
-    { id: genId(), kind: 'category_pie', title: '分类分布', catField: d.catField || '' },
+    {
+      id: genId(),
+      kind: 'category_pie',
+      title: '分类分布',
+      catField: d.catField || '',
+      chartStyle: 'pie',
+      legendPosition: 'bottom',
+      color: '#6366f1',
+      cardWidthPx: CARD_W_DEF,
+      chartHeightPx: CARD_H_DEF
+    },
     {
       id: genId(),
       kind: 'group_bar',
       title: '分组聚合',
       groupField: d.groupField || '',
       aggregateField: d.aggregateField || '',
-      aggregateType: agg
+      aggregateType: agg,
+      chartStyle: 'bar',
+      legendPosition: 'bottom',
+      color: '#6366f1',
+      cardWidthPx: CARD_W_DEF,
+      chartHeightPx: CARD_H_DEF
     }
   ]
 }
 
 function sanitizeCard(c: ChartCardConfig, fields: { all: string[]; numeric: string[] }): ChartCardConfig {
   const agg = c.aggregateType === 'avg' || c.aggregateType === 'count' ? c.aggregateType : 'sum'
+  const chartStyle: ChartCardConfig['chartStyle'] =
+    c.kind === 'category_pie'
+      ? c.chartStyle === 'bar'
+        ? 'bar'
+        : 'pie'
+      : c.chartStyle === 'line'
+        ? 'line'
+        : 'bar'
+  const legendPosition: ChartLegendPosition =
+    c.legendPosition === 'top' || c.legendPosition === 'left' || c.legendPosition === 'right' ? c.legendPosition : 'bottom'
+  const w =
+    typeof c.cardWidthPx === 'number' && Number.isFinite(c.cardWidthPx)
+      ? Math.min(CARD_W_MAX, Math.max(CARD_W_MIN, Math.round(c.cardWidthPx)))
+      : CARD_W_DEF
+  const h =
+    typeof c.chartHeightPx === 'number' && Number.isFinite(c.chartHeightPx)
+      ? Math.min(CARD_H_MAX, Math.max(CARD_H_MIN, Math.round(c.chartHeightPx)))
+      : CARD_H_DEF
+  const color = typeof c.color === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c.color.trim()) ? c.color.trim() : '#6366f1'
+  const base: ChartCardConfig = {
+    ...c,
+    chartStyle,
+    legendPosition,
+    color,
+    cardWidthPx: w,
+    chartHeightPx: h,
+    aggregateType: agg
+  }
   if (c.kind === 'category_pie') {
     const cf = c.catField?.trim() ?? ''
     return {
-      ...c,
-      catField: cf && fields.all.includes(cf) ? cf : '',
-      aggregateType: agg
+      ...base,
+      catField: cf && fields.all.includes(cf) ? cf : ''
     }
   }
   const gf = c.groupField?.trim() ?? ''
   const af = c.aggregateField?.trim() ?? ''
   return {
-    ...c,
+    ...base,
     groupField: gf && fields.all.includes(gf) ? gf : '',
-    aggregateField: af && fields.numeric.includes(af) ? af : '',
-    aggregateType: agg
+    aggregateField: af && fields.numeric.includes(af) ? af : ''
   }
 }
 
@@ -123,6 +177,70 @@ function scheduleCardChartsRefresh(): void {
   }, 140)
 }
 
+function legendEchartsOption(pos: ChartLegendPosition | undefined): Record<string, unknown> {
+  const p = pos ?? 'bottom'
+  if (p === 'top') return { type: 'scroll', top: 4 }
+  if (p === 'left') return { type: 'scroll', left: 4, orient: 'vertical' }
+  if (p === 'right') return { type: 'scroll', right: 4, orient: 'vertical' }
+  return { type: 'scroll', bottom: 0 }
+}
+
+function onResizeMove(ev: MouseEvent): void {
+  if (!resizeState) return
+  const card = chartCards.value.find((c) => c.id === resizeState!.cardId)
+  if (!card) return
+  const dw = ev.clientX - resizeState.startX
+  const dh = ev.clientY - resizeState.startY
+  card.cardWidthPx = Math.min(CARD_W_MAX, Math.max(CARD_W_MIN, resizeState.startW + dw))
+  card.chartHeightPx = Math.min(CARD_H_MAX, Math.max(CARD_H_MIN, resizeState.startH + dh))
+  void refreshCardChart(card.id)
+}
+
+function endCardResize(): void {
+  if (resizeState) {
+    resizeState = null
+    schedulePersistEmit()
+  }
+  window.removeEventListener('mousemove', onResizeMove)
+  window.removeEventListener('mouseup', endCardResize)
+}
+
+function startCardResize(card: ChartCardConfig, ev: MouseEvent): void {
+  ev.preventDefault()
+  ev.stopPropagation()
+  resizeState = {
+    cardId: card.id,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    startW: card.cardWidthPx ?? CARD_W_DEF,
+    startH: card.chartHeightPx ?? CARD_H_DEF
+  }
+  window.addEventListener('mousemove', onResizeMove)
+  window.addEventListener('mouseup', endCardResize)
+}
+
+function openChartEditor(card: ChartCardConfig): void {
+  chartEditorForm.value = JSON.parse(JSON.stringify(card)) as ChartCardConfig
+  chartEditorVisible.value = true
+}
+
+function applyChartEditor(): void {
+  const draft = chartEditorForm.value
+  if (!draft?.id) {
+    chartEditorVisible.value = false
+    return
+  }
+  const idx = chartCards.value.findIndex((c) => c.id === draft.id)
+  if (idx >= 0) {
+    const fields = { all: allFields.value, numeric: numericFields.value }
+    chartCards.value[idx] = sanitizeCard({ ...draft, id: draft.id }, fields)
+  }
+  chartEditorVisible.value = false
+  chartEditorForm.value = null
+  schedulePersistEmit()
+  scheduleCardChartsRefresh()
+}
+
 function applySavedDashboard(saved: DashboardUiPersistV1): void {
   const pickNum = (v: string): string => (v && numericFields.value.includes(v) ? v : '')
   const pickAny = (v: string): string => (v && allFields.value.includes(v) ? v : '')
@@ -162,6 +280,10 @@ async function refreshCardChart(cardId: string): Promise<void> {
   const pid = props.projectId
   if (!inst || !card || pid == null) return
 
+  const titleText = card.title?.trim()
+  const pal = card.color ?? '#6366f1'
+  const leg = legendEchartsOption(card.legendPosition)
+
   if (card.kind === 'category_pie') {
     const f = (card.catField ?? '').trim()
     if (!f) {
@@ -175,11 +297,31 @@ async function refreshCardChart(cardId: string): Promise<void> {
       inst.clear()
       return
     }
-    inst.setOption({
-      title: { text: card.title?.trim() || `「${f}」分布`, left: 'center', textStyle: { fontSize: 14 } },
-      tooltip: { trigger: 'item' },
-      series: [{ type: 'pie', radius: ['30%', '58%'], data }]
-    })
+    const style = card.chartStyle === 'bar' ? 'bar' : 'pie'
+    if (style === 'pie') {
+      inst.setOption({
+        color: [pal, '#8b5cf6', '#0ea5e9', '#f59e0b', '#10b981', '#ef4444'],
+        title: { text: titleText || `「${f}」分布`, left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'item' },
+        legend: { ...leg, data: data.map((d) => d.name) },
+        series: [{ type: 'pie', radius: ['30%', '58%'], data }]
+      })
+    } else {
+      inst.setOption({
+        color: [pal],
+        title: { text: titleText || `「${f}」计数`, left: 'center', textStyle: { fontSize: 14 } },
+        tooltip: { trigger: 'axis' },
+        legend: { show: false },
+        xAxis: {
+          type: 'category',
+          data: data.map((d) => d.name),
+          name: card.xAxisName?.trim() || f,
+          axisLabel: { rotate: 24 }
+        },
+        yAxis: { type: 'value', name: card.yAxisName?.trim() || '计数' },
+        series: [{ type: 'bar', data: data.map((d) => d.value), itemStyle: { color: pal } }]
+      })
+    }
   } else {
     const gf = (card.groupField ?? '').trim()
     const af = (card.aggregateField ?? '').trim()
@@ -202,16 +344,37 @@ async function refreshCardChart(cardId: string): Promise<void> {
       return
     }
     const aggLabel = card.aggregateType === 'avg' ? '平均' : card.aggregateType === 'count' ? '计数' : '求和'
+    const seriesType = card.chartStyle === 'line' ? 'line' : 'bar'
     inst.setOption({
+      color: [pal],
       title: {
-        text: card.title?.trim() || `${aggLabel}(${af}) · 按 ${gf}`,
+        text: titleText || `${aggLabel}(${af}) · 按 ${gf}`,
         left: 'center',
         textStyle: { fontSize: 14 }
       },
       tooltip: { trigger: 'axis' },
-      xAxis: { type: 'category', data: labels, axisLabel: { rotate: 28 } },
-      yAxis: { type: 'value' },
-      series: [{ type: 'bar', data: values, itemStyle: { color: '#6366f1' } }]
+      legend: { show: false },
+      xAxis: {
+        type: 'category',
+        data: labels,
+        name: card.xAxisName?.trim() || gf,
+        nameLocation: 'middle',
+        nameGap: 28,
+        axisLabel: { rotate: 28 }
+      },
+      yAxis: {
+        type: 'value',
+        name: card.yAxisName?.trim() || `${aggLabel}(${af})`
+      },
+      series: [
+        {
+          type: seriesType,
+          data: values,
+          itemStyle: { color: pal },
+          lineStyle: seriesType === 'line' ? { width: 2, color: pal } : undefined,
+          smooth: seriesType === 'line'
+        }
+      ]
     })
   }
   void nextTick(() => inst.resize())
@@ -313,10 +476,12 @@ function onKindChange(card: ChartCardConfig): void {
   if (card.kind === 'category_pie') {
     card.groupField = undefined
     card.aggregateField = undefined
+    card.chartStyle = 'pie'
     if (!(card.catField ?? '').trim() && catField.value) card.catField = catField.value
     if (!(card.catField ?? '').trim() && allFields.value[0]) card.catField = allFields.value[0]
   } else {
     card.catField = undefined
+    card.chartStyle = 'bar'
     if (!(card.groupField ?? '').trim() && allFields.value[0]) card.groupField = allFields.value[0]
     if (!(card.aggregateField ?? '').trim() && numericFields.value[0]) card.aggregateField = numericFields.value[0]
     card.aggregateType = card.aggregateType === 'avg' || card.aggregateType === 'count' ? card.aggregateType : 'sum'
@@ -331,7 +496,12 @@ function addChartCard(kind: ChartCardKind): void {
       id: genId(),
       kind,
       title: '分类分布',
-      catField: catField.value || allFields.value[0] || ''
+      catField: catField.value || allFields.value[0] || '',
+      chartStyle: 'pie',
+      legendPosition: 'bottom',
+      color: '#6366f1',
+      cardWidthPx: CARD_W_DEF,
+      chartHeightPx: CARD_H_DEF
     })
   } else {
     chartCards.value.push({
@@ -340,7 +510,12 @@ function addChartCard(kind: ChartCardKind): void {
       title: '分组聚合',
       groupField: allFields.value[0] || '',
       aggregateField: numericFields.value[0] || '',
-      aggregateType: 'sum'
+      aggregateType: 'sum',
+      chartStyle: 'bar',
+      legendPosition: 'bottom',
+      color: '#6366f1',
+      cardWidthPx: CARD_W_DEF,
+      chartHeightPx: CARD_H_DEF
     })
   }
   schedulePersistEmit()
@@ -390,6 +565,7 @@ watch(loading, (v) => {
 onBeforeUnmount(() => {
   if (persistTimer) clearTimeout(persistTimer)
   if (cardRefreshTimer) clearTimeout(cardRefreshTimer)
+  endCardResize()
   disposeAllCardCharts()
 })
 
@@ -406,7 +582,7 @@ defineExpose({
     <div class="dash-hero">
       <h2>数据统计与洞察</h2>
       <p class="dash-sub">
-        基于当前项目中已导入的结构化行（Excel / CSV / JSON / AI 入库）。图表支持多张卡片、拖拽排序，配置随项目保存。
+        基于当前项目中已导入的结构化行（Excel / CSV / JSON / AI 入库）。图表支持拖拽排序、**拖拽右下角调整大小**、双击或「编辑」精细配置；设置随项目保存。
       </p>
       <div class="dash-kpis">
         <el-card shadow="hover" class="kpi-card">
@@ -487,6 +663,7 @@ defineExpose({
           v-for="(card, index) in chartCards"
           :key="card.id"
           class="chart-dash-card"
+          :style="{ width: `${card.cardWidthPx ?? CARD_W_DEF}px` }"
           @dragover="onCardDragOver"
           @drop.prevent="onCardDrop(index)"
         >
@@ -505,6 +682,7 @@ defineExpose({
               <el-option label="分类饼图" value="category_pie" />
               <el-option label="分组柱状图" value="group_bar" />
             </el-select>
+            <el-button text circle type="primary" :icon="EditPen" title="编辑图表" @click="openChartEditor(card)" />
             <el-button text circle type="danger" :icon="Delete" @click="removeChartCard(index)" />
           </div>
           <div v-if="card.kind === 'category_pie'" class="chart-dash-card-fields">
@@ -534,11 +712,100 @@ defineExpose({
               </el-form-item>
             </el-form>
           </div>
-          <div :ref="(el) => bindChartHost(card.id, el)" class="chart-sub" />
+          <div
+            :ref="(el) => bindChartHost(card.id, el)"
+            class="chart-sub"
+            :style="{ height: `${card.chartHeightPx ?? CARD_H_DEF}px` }"
+            title="双击打开编辑"
+            @dblclick.stop="openChartEditor(card)"
+          />
+          <div class="chart-resize-handle" title="拖拽调整大小" @mousedown="startCardResize(card, $event)" />
         </div>
       </div>
     </el-card>
   </div>
+
+  <el-dialog
+    v-model="chartEditorVisible"
+    title="编辑图表"
+    width="540px"
+    destroy-on-close
+    @closed="chartEditorForm = null"
+  >
+    <template v-if="chartEditorForm">
+      <el-form label-position="top" size="small">
+        <el-form-item label="标题">
+          <el-input v-model="chartEditorForm.title" placeholder="图表标题" />
+        </el-form-item>
+        <el-form-item v-if="chartEditorForm.kind === 'category_pie'" label="图表类型">
+          <el-radio-group v-model="chartEditorForm.chartStyle">
+            <el-radio-button value="pie">饼图</el-radio-button>
+            <el-radio-button value="bar">柱状</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-else label="图表类型">
+          <el-radio-group v-model="chartEditorForm.chartStyle">
+            <el-radio-button value="bar">柱状</el-radio-button>
+            <el-radio-button value="line">折线</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="横轴 / 分类轴名称">
+          <el-input v-model="chartEditorForm.xAxisName" placeholder="可选；饼图仅在柱状模式下有效" />
+        </el-form-item>
+        <el-form-item label="纵轴 / 数值轴名称">
+          <el-input v-model="chartEditorForm.yAxisName" placeholder="可选" />
+        </el-form-item>
+        <el-form-item v-if="chartEditorForm.kind === 'category_pie'" label="分类列">
+          <el-select v-model="chartEditorForm.catField" filterable style="width: 100%">
+            <el-option v-for="f in allFields" :key="`ed-c-${f}`" :label="f" :value="f" />
+          </el-select>
+        </el-form-item>
+        <template v-else>
+          <el-form-item label="分组列">
+            <el-select v-model="chartEditorForm.groupField" filterable style="width: 100%">
+              <el-option v-for="f in allFields" :key="`ed-g-${f}`" :label="f" :value="f" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="聚合列">
+            <el-select v-model="chartEditorForm.aggregateField" filterable style="width: 100%">
+              <el-option v-for="f in numericFields" :key="`ed-a-${f}`" :label="f" :value="f" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="聚合方式">
+            <el-select v-model="chartEditorForm.aggregateType" style="width: 100%">
+              <el-option label="求和" value="sum" />
+              <el-option label="平均" value="avg" />
+              <el-option label="计数" value="count" />
+            </el-select>
+          </el-form-item>
+        </template>
+        <el-form-item label="主色">
+          <div class="chart-editor-color-row">
+            <el-color-picker v-model="chartEditorForm.color" :predefine="['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444']" />
+            <el-input v-model="chartEditorForm.color" class="chart-editor-color-input" />
+          </div>
+        </el-form-item>
+        <el-form-item label="图例位置">
+          <el-select v-model="chartEditorForm.legendPosition" style="width: 100%">
+            <el-option label="底部" value="bottom" />
+            <el-option label="顶部" value="top" />
+            <el-option label="左侧" value="left" />
+            <el-option label="右侧" value="right" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="卡片宽度 (px)">
+          <el-input-number v-model="chartEditorForm.cardWidthPx" :min="CARD_W_MIN" :max="CARD_W_MAX" :step="10" />
+        </el-form-item>
+        <el-form-item label="绘图区高度 (px)">
+          <el-input-number v-model="chartEditorForm.chartHeightPx" :min="CARD_H_MIN" :max="CARD_H_MAX" :step="10" />
+        </el-form-item>
+      </el-form>
+    </template>
+    <template #footer>
+      <el-button @click="chartEditorVisible = false">取消</el-button>
+      <el-button type="primary" @click="applyChartEditor">保存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -635,16 +902,41 @@ defineExpose({
   text-align: center;
 }
 .chart-gallery-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
-  gap: 12px;
-  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-start;
 }
 .chart-dash-card {
+  position: relative;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   padding: 12px;
   background: #fafafa;
+  flex: 0 0 auto;
+}
+.chart-resize-handle {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  z-index: 3;
+  border-radius: 2px;
+  background: linear-gradient(135deg, transparent 52%, #94a3b8 52%);
+  opacity: 0.85;
+}
+.chart-resize-handle:hover {
+  opacity: 1;
+}
+.chart-editor-color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.chart-editor-color-input {
+  width: 120px;
 }
 .chart-dash-card-toolbar {
   display: flex;
@@ -685,8 +977,7 @@ defineExpose({
 }
 .chart-sub {
   width: 100%;
-  height: 220px;
-  min-height: 180px;
+  min-height: 120px;
 }
 .dash-row {
   margin-top: 4px;
