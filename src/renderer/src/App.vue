@@ -11,6 +11,7 @@ import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, F
 
 type ItemRow = {
   id: number
+  notebook_id?: number
   project_id: number | null
   type: 'note' | 'excel_row' | 'document' | 'file'
   title: string
@@ -423,6 +424,10 @@ const copilotModeBadge = computed(() => {
 })
 
 function openGlobalLinkedFlyout(): void {
+  if (globalLinkedFlyoutOpen.value) {
+    globalLinkedFlyoutOpen.value = false
+    return
+  }
   globalLinkedDraftIds.value = [...globalLinkedProjectIds.value]
   globalLinkedFlyoutOpen.value = true
 }
@@ -858,10 +863,8 @@ const switchProject = async (projectId: number): Promise<void> => {
   selectedContextNode.value = null
   detailDrawerVisible.value = false
   isFocusMode.value = false
-  await runSearch()
-  await loadProjectNotes()
+  await Promise.all([runSearch(), loadProjectNotes(), loadAllTags()])
   coerceTableFilterForAvailableTypes()
-  await loadAllTags()
   if (copilotVisible.value && copilotMode.value === 'project') {
     await loadAiTopicsForProject()
     await resolveActiveTopicSelection()
@@ -2759,7 +2762,7 @@ onUnmounted(() => {
     </div>
   </el-drawer>
 
- title="导入数据到当前项目" width="440px" align-center>
+  <el-dialog v-model="importChoiceDialogVisible" title="导入数据到当前项目" width="440px" align-center>
     <p class="import-choice-hint">请选择数据来源。结构化表格支持 Excel、CSV、JSON。</p>
     <div class="import-choice-actions">
       <el-button type="primary" @click="pickLocalFileAndImport">从本地电脑导入</el-button>
@@ -3565,6 +3568,7 @@ onUnmounted(() => {
   position: relative;
 }
 
+.copilot-topic-rail-mini {
   width: 52px;
   flex-shrink: 0;
   border-right: 1px solid #eef2f7;

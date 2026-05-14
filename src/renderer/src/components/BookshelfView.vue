@@ -59,7 +59,7 @@ function noteCoverStyle(contentJson: string): Record<string, string> {
 const childFolderNodes = computed<TreeNode[]>(() => {
   const sel = selectedNotebookId.value
   const roots = treeData.value
-  if (sel == null) return []
+  if (sel == null) return roots
   function find(nodes: TreeNode[], id: number): TreeNode | null {
     for (const n of nodes) {
       if (n.id === id) return n
@@ -75,6 +75,29 @@ const childFolderNodes = computed<TreeNode[]>(() => {
   return node.children
 })
 
+const notebookNameById = computed(() => {
+  const m = new Map<number, string>()
+  for (const r of tree.value) {
+    m.set(r.id, r.name)
+  }
+  return m
+})
+
+function itemNotebookLabel(it: ItemRow): string {
+  const nid = it.notebook_id
+  if (nid == null) return ''
+  return notebookNameById.value.get(nid) ?? `#${nid}`
+}
+
+function itemDateLine(it: ItemRow): string {
+  const d = it.updated_at?.trim() || it.created_at || ''
+  return d.slice(0, 16)
+}
+
+function defaultTargetNotebookId(): number | null {
+  if (selectedNotebookId.value != null) return selectedNotebookId.value
+  return tree.value[0]?.id ?? null
+}
 const filteredItems = computed(() => {
   let list = items.value
   const q = searchQuery.value.trim().toLowerCase()
@@ -123,19 +146,19 @@ async function loadTree(selectFirst = false): Promise<void> {
     return
   }
   tree.value = r.data ?? []
-  if (selectFirst || selectedNotebookId.value == null) {
+  if (selectFirst) {
     const first = tree.value[0]?.id ?? null
     selectedNotebookId.value = first
   }
 }
 
 async function loadItems(): Promise<void> {
-  const nid = selectedNotebookId.value
-  if (nid == null) {
-    items.value = []
+  if (selectedNotebookId.value == null) {
+    const r = await window.api.listAllBookshelfGlobalItems()
+    items.value = r.success ? r.data ?? [] : []
     return
   }
-  const r = await window.api.listBookshelfItems(nid)
+  const r = await window.api.listBookshelfItems(selectedNotebookId.value)
   if (!r.success) {
     items.value = []
     return
@@ -143,8 +166,10 @@ async function loadItems(): Promise<void> {
   items.value = r.data ?? []
 }
 
-async function createFolder(): Promise<void> {
-  const parentId = selectedNotebookId.value
+const hasAnyNotebook = computed(() => tree.value.length > 0)
+
+async function createFolder(parentIdOverride?: number | null): Promise<void> {
+  const parentId = parentIdOverride !== undefined ? parentIdOverride : (selectedNotebookId.value ?? null)
   const res = await ElMessageBox.prompt('文件夹名称', '新建文件夹', {
     confirmButtonText: '创建',
     cancelButtonText: '取消',
@@ -157,7 +182,7 @@ async function createFolder(): Promise<void> {
     ElMessage.warning('名称不能为空')
     return
   }
-  const r = await window.api.createBookshelfFolder(name, parentId ?? undefined)
+  const r = await window.api.createBookshelfFolder(name, parentId == null ? undefined : parentId)
   if (!r.success) {
     ElMessage.warning((r as { message?: string }).message || '创建失败')
     return
@@ -168,6 +193,7 @@ async function createFolder(): Promise<void> {
 async function renameFolder(data: NotebookRow): Promise<void> {
   const res = await ElMessageBox.prompt('新名称', '重命名', {
     confirmButtonText: '保存',
+    inputPlaceholder: '请输入名称',
     inputValue: data.name
   }).catch(() => null)
   if (!res) return
@@ -192,27 +218,276 @@ async function removeFolder(data: NotebookRow): Promise<void> {
     ElMessage.warning((r as { message?: string }).message || '删除失败')
     return
   }
+  if (selectedNotebookId.value === data.id) {
+    selectedNotebookId.value = null
+  }
+  await loadTree(false)
+  await loadItems()
+}
+
+function showOverview(): void {
   selectedNotebookId.value = null
-  await loadTree(true)
 }
 
 function onTreeSelect(node: NotebookRow): void {
   selectedNotebookId.value = node.id
 }
 
+function allowTreeDrop(): boolean {
+  return true
+}
+
+async function onNotebookDrop(draggingNode: { data: NotebookRow }, dropNode: { data: NotebookRow; parent: { data?: NotebookRow } }, dropType: string): Promise<void> {
+  const dragId = draggingNode.data.id
+  let parentId: number | null = null
+  if (dropType === 'inner') {
+    parentId = dropNode.data.id
+  } else {
+    const pd = dropNode.parent?.data
+    parentId = pd?.id ?? null
+  }
+  if (dragId === parentId) {
+    await loadTree(false)
+    return
+  }
+  const r = await window.api.moveBookshelfNotebook(dragId, parentId)
+  if (!r.success) {
+    ElMessage.warning((r as { message?: string }).message || '移动失败')
+  }
+  await loadTree(false)
+  if (selectedNotebookId.value === dragId) {
+    /* keep */
+  }
+  await loadItems()
+}
+
+function onItemDragStart(it: ItemRow, ev: DragEvent): void {
+  if (it.type === 'note' || it.type === 'file' || it.type === 'document') {
+    ev.dataTransfer?.setData('application/x-datanode-bookshelf-item', String(it.id))
+    ev.dataTransfer!.effectAllowed = 'move'
+  }
+}
+
+async function onDropOnFolder(fd: NotebookRow, ev: DragEvent): Promise<void> {
+  ev.preventDefault()
+  const raw = ev.dataTransfer?.getData('application/x-datanode-bookshelf-item')
+  if (!raw) return
+  const r = await window.api.moveBookshelfItem(Number(raw), fd.id)
+  if (!r.success) ElMessage.warning((r as { message?: string }).message || '移动失败')
+  else {
+    ElMessage.success('已移动到文件夹')
+  }
+  await loadItems()
+  await graphCanvasRef.value?.refresh()
+}
+
+const ctxMenu = ref<{
+  x: number
+  y: number
+  kind: 'note' | 'file' | 'folder'
+  note?: ItemRow
+  folder?: NotebookRow
+} | null>(null)
+
+function ctxPanelStyle(m: { x: number; y: number }): Record<string, string> {
+  const maxL = Math.max(8, window.innerWidth - 220)
+  const maxT = Math.max(8, window.innerHeight - 280)
+  return {
+    left: `${Math.min(m.x, maxL)}px`,
+    top: `${Math.min(m.y, maxT)}px`
+  }
+}
+
+function closeCtx(): void {
+  ctxMenu.value = null
+}
+
+function openNoteCtx(ev: MouseEvent, it: ItemRow): void {
+  ev.preventDefault()
+  ctxMenu.value = { x: ev.clientX, y: ev.clientY, kind: it.type === 'note' ? 'note' : 'file', note: it }
+}
+
+function openFolderCtx(ev: MouseEvent, fd: NotebookRow): void {
+  ev.preventDefault()
+  ctxMenu.value = { x: ev.clientX, y: ev.clientY, kind: 'folder', folder: fd }
+}
+
+function ctxNewNoteInFolder(): void {
+  const fd = ctxMenu.value?.folder
+  closeCtx()
+  if (!fd) return
+  emit('new-note', { notebookId: fd.id })
+}
+
+async function ctxNewFolderUnder(): Promise<void> {
+  const fd = ctxMenu.value?.folder
+  closeCtx()
+  if (!fd) return
+  await createFolder(fd.id)
+}
+
+function ctxOpenFolderRename(): void {
+  const fd = ctxMenu.value?.folder
+  closeCtx()
+  if (!fd) return
+  void renameFolder(fd)
+}
+
+async function ctxOpenFolderDelete(): Promise<void> {
+  const fd = ctxMenu.value?.folder
+  closeCtx()
+  if (!fd) return
+  await removeFolder(fd)
+}
+
+function ctxOpenFolderMove(): void {
+  const fd = ctxMenu.value?.folder
+  if (!fd) return
+  openMoveFolderDialog(fd)
+}
+
+async function ctxRenameItem(): Promise<void> {
+  const it = ctxMenu.value?.note
+  closeCtx()
+  if (!it) return
+  const res = await ElMessageBox.prompt('名称', '重命名', {
+    confirmButtonText: '保存',
+    inputPlaceholder: '请输入名称',
+    inputValue: cardTitle(it)
+  }).catch(() => null)
+  if (!res) return
+  const name = res.value.trim()
+  if (!name) return
+  const r = await window.api.renameBookshelfItem(it.id, name)
+  if (!r.success) ElMessage.warning((r as { message?: string }).message || '失败')
+  await loadItems()
+}
+
+async function ctxDeleteItem(): Promise<void> {
+  const it = ctxMenu.value?.note
+  closeCtx()
+  if (!it) return
+  try {
+    await ElMessageBox.confirm(`确定删除「${cardTitle(it)}」？`, '删除', { type: 'warning' })
+  } catch {
+    return
+  }
+  const r = await window.api.deleteBookshelfItem(it.id)
+  if (!r.success) ElMessage.warning((r as { message?: string }).message || '删除失败')
+  await loadItems()
+  await graphCanvasRef.value?.refresh()
+}
+
+async function ctxCoverCmd(cmd: string): Promise<void> {
+  const it = ctxMenu.value?.note
+  closeCtx()
+  if (!it || it.type !== 'note') return
+  await onCoverCommand(it, cmd)
+}
+
+async function ctxCopyNote(): Promise<void> {
+  const it = ctxMenu.value?.note
+  closeCtx()
+  if (!it || it.type !== 'note') return
+  const r = await window.api.duplicateBookshelfNote(it.id)
+  if (!r.success) ElMessage.warning((r as { message?: string }).message || '复制失败')
+  else ElMessage.success('已复制笔记')
+  await loadItems()
+}
+
+const moveItemDialogVisible = ref(false)
+const moveItemPick = ref<ItemRow | null>(null)
+const moveItemTargetNotebookId = ref<number | undefined>(undefined)
+
+function openMoveItemDialog(it: ItemRow): void {
+  closeCtx()
+  moveItemPick.value = it
+  const first = tree.value[0]?.id
+  const cur = it.notebook_id ?? selectedNotebookId.value
+  moveItemTargetNotebookId.value = tree.value.find((row) => row.id !== cur)?.id ?? first
+  moveItemDialogVisible.value = true
+}
+
+async function confirmMoveItem(): Promise<void> {
+  const it = moveItemPick.value
+  const nid = moveItemTargetNotebookId.value
+  if (!it || nid == null) {
+    moveItemDialogVisible.value = false
+    return
+  }
+  const r = await window.api.moveBookshelfItem(it.id, nid)
+  if (!r.success) ElMessage.warning((r as { message?: string }).message || '移动失败')
+  else {
+    ElMessage.success('已移动')
+    await loadItems()
+    await graphCanvasRef.value?.refresh()
+  }
+  moveItemDialogVisible.value = false
+}
+
+const moveFolderDialogVisible = ref(false)
+const moveFolderPick = ref<NotebookRow | null>(null)
+/** `null` = 书柜根目录 */
+const moveFolderNewParentId = ref<number | null | undefined>(undefined)
+
+function folderIsAncestorOf(ancestorId: number, nodeId: number): boolean {
+  let id: number | null = nodeId
+  const byId = new Map(tree.value.map((r) => [r.id, r]))
+  while (id != null) {
+    if (id === ancestorId) return true
+    id = byId.get(id)?.parent_id ?? null
+  }
+  return false
+}
+
+function openMoveFolderDialog(fd: NotebookRow): void {
+  closeCtx()
+  moveFolderPick.value = fd
+  moveFolderNewParentId.value = fd.parent_id == null ? null : fd.parent_id
+  moveFolderDialogVisible.value = true
+}
+
+const moveFolderParentOptions = computed(() => {
+  const fd = moveFolderPick.value
+  if (!fd) return []
+  return tree.value.filter((r) => r.id !== fd.id && !folderIsAncestorOf(fd.id, r.id))
+})
+
+async function confirmMoveFolder(): Promise<void> {
+  const fd = moveFolderPick.value
+  if (fd == null) {
+    moveFolderDialogVisible.value = false
+    return
+  }
+  const parentId = moveFolderNewParentId.value
+  if (parentId === undefined) {
+    moveFolderDialogVisible.value = false
+    return
+  }
+  const r = await window.api.moveBookshelfNotebook(fd.id, parentId)
+  if (!r.success) ElMessage.warning((r as { message?: string }).message || '移动失败')
+  else {
+    ElMessage.success('文件夹已移动')
+    await loadTree(false)
+    await loadItems()
+    await graphCanvasRef.value?.refresh()
+  }
+  moveFolderDialogVisible.value = false
+}
+
 function newNote(): void {
-  const nid = selectedNotebookId.value
+  const nid = defaultTargetNotebookId()
   if (nid == null) {
-    ElMessage.warning('请先选择文件夹')
+    ElMessage.warning('请先新建或选择一个文件夹')
     return
   }
   emit('new-note', { notebookId: nid })
 }
 
 async function importDocument(): Promise<void> {
-  const nid = selectedNotebookId.value
+  const nid = defaultTargetNotebookId()
   if (nid == null) {
-    ElMessage.warning('请先选择文件夹')
+    ElMessage.warning('请先新建或选择一个文件夹')
     return
   }
   const picked = await window.api.pickImportFile()
@@ -232,8 +507,11 @@ async function importDocument(): Promise<void> {
 
 function openItem(it: ItemRow): void {
   if (it.type === 'note') {
-    const nb = selectedNotebookId.value
-    if (nb == null) return
+    const nb = it.notebook_id ?? selectedNotebookId.value
+    if (nb == null) {
+      ElMessage.warning('无法定位笔记所在文件夹')
+      return
+    }
     emit('edit-note', { id: it.id, notebookId: nb })
     return
   }
@@ -281,11 +559,20 @@ function cardTitle(it: ItemRow): string {
   return `${it.type} #${it.id}`
 }
 
+function itemMetaLine(it: ItemRow): string {
+  const loc = itemNotebookLabel(it)
+  const d = itemDateLine(it)
+  return [loc, d].filter(Boolean).join(' · ')
+}
+
 async function onLayoutSave(positions: Array<{ id: number; x: number; y: number }>): Promise<void> {
   await window.api.updateNodePositions(positions)
 }
 
-watch(selectedNotebookId, () => {
+const treeRef = ref<{ setCurrentKey: (k?: number) => void } | null>(null)
+
+watch(selectedNotebookId, (id) => {
+  treeRef.value?.setCurrentKey(id ?? undefined)
   void loadItems()
 })
 
@@ -296,7 +583,7 @@ watch(shelfTab, (t) => {
 })
 
 onMounted(() => {
-  void loadTree(true).then(() => loadItems())
+  void loadTree(false).then(() => loadItems())
 })
 
 defineExpose({ refreshLibrary: async () => {
@@ -317,21 +604,26 @@ defineExpose({ refreshLibrary: async () => {
 
     <div v-show="shelfTab === 'library'" class="bookshelf-body">
       <aside class="bookshelf-aside">
-        <div class="aside-actions">
-          <el-button type="primary" size="small" :icon="FolderAdd" @click="createFolder">新建文件夹</el-button>
+        <div class="aside-actions aside-actions--stack">
+          <el-button size="small" plain @click="showOverview">资料概览</el-button>
+          <el-button type="primary" size="small" :icon="FolderAdd" @click="createFolder()">新建文件夹</el-button>
         </div>
         <el-scrollbar class="tree-wrap">
           <el-tree
             v-if="treeData.length"
+            ref="treeRef"
             :data="treeData"
             :props="treeProps"
             node-key="id"
             highlight-current
             default-expand-all
+            draggable
+            :allow-drop="allowTreeDrop"
             @node-click="onTreeSelect"
+            @node-drop="onNotebookDrop"
           >
             <template #default="{ data }">
-              <span class="tree-node-row">
+              <span class="tree-node-row" @contextmenu.prevent="openFolderCtx($event, data)">
                 <span class="tree-node-label">{{ data.name }}</span>
                 <span class="tree-node-actions">
                   <el-button text circle size="small" :icon="EditPen" @click.stop="renameFolder(data)" />
@@ -340,16 +632,14 @@ defineExpose({ refreshLibrary: async () => {
               </span>
             </template>
           </el-tree>
-          <el-empty v-else description="尚无文件夹" :image-size="64" />
+          <el-empty v-else description="尚无文件夹，请先新建" :image-size="64" />
         </el-scrollbar>
       </aside>
 
       <main class="bookshelf-main">
         <header class="bookshelf-toolbar">
-          <el-button type="primary" :icon="Plus" :disabled="selectedNotebookId == null" @click="newNote">
-            新建笔记
-          </el-button>
-          <el-button :icon="Upload" :disabled="selectedNotebookId == null" @click="importDocument">导入文档</el-button>
+          <el-button type="primary" :icon="Plus" :disabled="!hasAnyNotebook" @click="newNote">新建笔记</el-button>
+          <el-button :icon="Upload" :disabled="!hasAnyNotebook" @click="importDocument">导入文档</el-button>
           <el-input
             v-model="searchQuery"
             placeholder="搜索标题 / 正文 / 路径"
@@ -363,10 +653,11 @@ defineExpose({ refreshLibrary: async () => {
         </header>
 
         <el-scrollbar class="card-scroll">
-          <div v-if="!selectedNotebookId" class="empty-select">
-            <el-empty description="请选择左侧文件夹" />
-          </div>
-          <div v-else class="library-cards">
+          <div class="library-cards">
+            <div class="section-label row-between">
+              <span>{{ selectedNotebookId == null ? '资料概览' : '当前文件夹' }}</span>
+            </div>
+
             <section v-if="childFolderNodes.length" class="folder-section">
               <div class="section-label">文件夹</div>
               <div class="folder-card-row">
@@ -376,6 +667,9 @@ defineExpose({ refreshLibrary: async () => {
                   type="button"
                   class="folder-tile"
                   @click="onTreeSelect(fd)"
+                  @contextmenu.prevent="openFolderCtx($event, fd)"
+                  @dragover.prevent
+                  @drop="onDropOnFolder(fd, $event)"
                 >
                   <div class="folder-tile-icon">
                     <el-icon :size="28"><FolderOpened /></el-icon>
@@ -394,7 +688,10 @@ defineExpose({ refreshLibrary: async () => {
                 :key="it.id"
                 class="shelf-card"
                 :class="{ 'shelf-card--note': it.type === 'note' }"
+                draggable="true"
+                @dragstart="onItemDragStart(it, $event)"
                 @click="openItem(it)"
+                @contextmenu.prevent="openNoteCtx($event, it)"
               >
                 <template v-if="it.type === 'note'">
                   <div class="note-cover" :style="noteCoverStyle(it.content_json)">
@@ -416,7 +713,7 @@ defineExpose({ refreshLibrary: async () => {
                       <el-icon class="shelf-card-icon"><Reading /></el-icon>
                       <span class="shelf-card-title">{{ cardTitle(it) }}</span>
                     </div>
-                    <div class="shelf-card-meta">创建 {{ it.created_at?.slice(0, 16) }}</div>
+                    <div class="shelf-card-meta">{{ itemMetaLine(it) }}</div>
                     <p class="shelf-card-snippet">{{ (it.content_text || '').replace(/<[^>]+>/g, '').slice(0, 96) }}</p>
                   </div>
                 </template>
@@ -427,16 +724,73 @@ defineExpose({ refreshLibrary: async () => {
                       <el-icon v-else class="shelf-card-icon"><Collection /></el-icon>
                       <span class="shelf-card-title">{{ cardTitle(it) }}</span>
                     </div>
-                    <div class="shelf-card-meta">{{ it.type }} · {{ it.created_at?.slice(0, 16) }}</div>
+                    <div class="shelf-card-meta">{{ it.type }} · {{ itemMetaLine(it) }}</div>
                   </div>
                 </template>
               </div>
-              <el-empty v-if="!filteredItems.length" description="该文件夹暂无条目" />
+              <el-empty v-if="!filteredItems.length" description="暂无条目" />
             </div>
           </div>
         </el-scrollbar>
       </main>
     </div>
+
+    <div
+      v-if="ctxMenu"
+      class="ctx-scrim"
+      @mousedown="closeCtx"
+    />
+    <div v-if="ctxMenu" class="ctx-panel" :style="ctxPanelStyle(ctxMenu)" @mousedown.stop>
+      <template v-if="ctxMenu.kind === 'folder' && ctxMenu.folder">
+        <button type="button" class="ctx-item" @click="ctxOpenFolderRename">重命名</button>
+        <button type="button" class="ctx-item" @click="ctxOpenFolderDelete">删除</button>
+        <button type="button" class="ctx-item" @click="ctxOpenFolderMove">移动到…</button>
+        <button type="button" class="ctx-item" @click="ctxNewNoteInFolder">新建笔记</button>
+        <button type="button" class="ctx-item" @click="ctxNewFolderUnder">新建文件夹</button>
+      </template>
+      <template v-else-if="ctxMenu.note">
+        <button type="button" class="ctx-item" @click="ctxRenameItem">重命名</button>
+        <button type="button" class="ctx-item" @click="ctxDeleteItem">删除</button>
+        <button type="button" class="ctx-item" @click="openMoveItemDialog(ctxMenu.note)">移动到…</button>
+        <button v-if="ctxMenu.note.type === 'note'" type="button" class="ctx-item" @click="ctxCopyNote">复制</button>
+        <template v-if="ctxMenu.note.type === 'note'">
+          <div class="ctx-sub">切换封面</div>
+          <button
+            v-for="pr in PRESET_COVERS"
+            :key="pr.key"
+            type="button"
+            class="ctx-item ctx-item--sub"
+            @click="ctxCoverCmd(`preset:${pr.key}`)"
+          >
+            {{ pr.label }}
+          </button>
+          <button type="button" class="ctx-item ctx-item--sub" @click="ctxCoverCmd('upload')">自定义图片…</button>
+          <button type="button" class="ctx-item ctx-item--sub" @click="ctxCoverCmd('clear')">恢复默认</button>
+        </template>
+      </template>
+    </div>
+
+    <el-dialog v-model="moveItemDialogVisible" title="移动到文件夹" width="420px" destroy-on-close align-center>
+      <el-select v-model="moveItemTargetNotebookId" placeholder="选择目标文件夹" filterable style="width: 100%">
+        <el-option v-for="row in tree" :key="row.id" :label="row.name" :value="row.id" />
+      </el-select>
+      <template #footer>
+        <el-button @click="moveItemDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmMoveItem">移动</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="moveFolderDialogVisible" title="移动文件夹" width="420px" destroy-on-close align-center>
+      <p v-if="moveFolderPick" class="move-folder-hint">将「{{ moveFolderPick.name }}」移动到：</p>
+      <el-select v-model="moveFolderNewParentId" placeholder="选择父文件夹" filterable style="width: 100%">
+        <el-option label="书柜根目录" :value="null" />
+        <el-option v-for="row in moveFolderParentOptions" :key="row.id" :label="row.name" :value="row.id" />
+      </el-select>
+      <template #footer>
+        <el-button @click="moveFolderDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmMoveFolder">移动</el-button>
+      </template>
+    </el-dialog>
 
     <div v-show="shelfTab === 'graph'" class="bookshelf-graph-pane">
       <div class="graph-toolbar">
@@ -483,6 +837,11 @@ defineExpose({ refreshLibrary: async () => {
 }
 .aside-actions {
   padding: 10px;
+}
+.aside-actions--stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .tree-wrap {
   flex: 1;
@@ -663,9 +1022,6 @@ defineExpose({ refreshLibrary: async () => {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.empty-select {
-  padding: 48px;
-}
 .bookshelf-graph-pane {
   flex: 1;
   display: flex;
@@ -685,5 +1041,54 @@ defineExpose({ refreshLibrary: async () => {
 .bookshelf-graph-pane :deep(.kg-canvas) {
   flex: 1;
   min-height: 480px;
+}
+.ctx-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2999;
+  background: transparent;
+}
+.ctx-panel {
+  position: fixed;
+  z-index: 3000;
+  min-width: 200px;
+  max-width: 280px;
+  padding: 8px 0;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.18);
+  border: 1px solid #e2e8f0;
+}
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  color: #0f172a;
+  cursor: pointer;
+  font-family: inherit;
+}
+.ctx-item:hover {
+  background: #f1f5f9;
+}
+.ctx-item--sub {
+  padding-left: 28px;
+  font-size: 13px;
+  color: #475569;
+}
+.ctx-sub {
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+  letter-spacing: 0.04em;
+}
+.move-folder-hint {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: #475569;
 }
 </style>

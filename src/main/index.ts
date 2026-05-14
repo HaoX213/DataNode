@@ -27,6 +27,7 @@ import {
   deleteNotebook,
   renameNotebook,
   listBookshelfItems,
+  listAllBookshelfGlobalItems,
   listBookshelfImportCandidates,
   listProjectNotes,
   listNotebookTree,
@@ -59,7 +60,12 @@ import {
   setStoragePath,
   updateNodeDetail,
   patchItemCoverImage,
-  updateNodePositions
+  updateNodePositions,
+  moveNotebookToParent,
+  moveBookshelfItemToNotebook,
+  deleteBookshelfGlobalItem,
+  duplicateBookshelfNote,
+  renameBookshelfItem
 } from './db'
 import type { ProjectUiStateV1 } from './db'
 import {
@@ -245,6 +251,53 @@ app.whenReady().then(() => {
       return { success: true, data: toSerializable(listBookshelfItems(Number(notebookId))) }
     } catch (error) {
       return { success: false, message: String(error), data: [] }
+    }
+  })
+  ipcMain.handle('bookshelf:items:list-all', () => {
+    try {
+      return { success: true, data: toSerializable(listAllBookshelfGlobalItems()) }
+    } catch (error) {
+      return { success: false, message: String(error), data: [] }
+    }
+  })
+  ipcMain.handle('bookshelf:notebook:move', (_, notebookId: number, parentId: number | null) => {
+    try {
+      moveNotebookToParent(Number(notebookId), parentId === null || parentId === undefined ? null : Number(parentId))
+      return { success: true }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:item:move', (_, itemId: number, notebookId: number) => {
+    try {
+      moveBookshelfItemToNotebook(Number(itemId), Number(notebookId))
+      return { success: true }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:item:delete', (_, itemId: number) => {
+    try {
+      deleteBookshelfGlobalItem(Number(itemId))
+      return { success: true }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:note:duplicate', (_, itemId: number) => {
+    try {
+      const id = duplicateBookshelfNote(Number(itemId))
+      return { success: true, data: { id } }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:item:rename', (_, itemId: number, title: string) => {
+    try {
+      renameBookshelfItem(Number(itemId), String(title ?? ''))
+      return { success: true }
+    } catch (error) {
+      return { success: false, message: String(error) }
     }
   })
   ipcMain.handle('bookshelf:import:candidates', () => {

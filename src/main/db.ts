@@ -811,19 +811,151 @@ export function deleteNotebook(notebookId: number): void {
   database.prepare('DELETE FROM notebooks WHERE id = ?').run(notebookId)
 }
 
+function notebookIsDescendant(database: ReturnType<typeof getDb>, ancestorId: number, candidateParentId: number): boolean {
+  let cur: number | null = candidateParentId
+  const seen = new Set<number>()
+  while (cur != null && !seen.has(cur)) {
+    seen.add(cur)
+    if (cur === ancestorId) return true
+    const row = database.prepare('SELECT parent_id FROM notebooks WHERE id = ?').get(cur) as { parent_id: number | null } | undefined
+    cur = row?.parent_id ?? null
+  }
+  return false
+}
+
+export function moveNotebookToParent(notebookId: number, parentId: number | null): void {
+  const database = getDb()
+  if (parentId === notebookId) throw new Error('不能将文件夹放入自身')
+  const self = database.prepare('SELECT id FROM notebooks WHERE id = ?').get(notebookId) as { id: number } | undefined
+  if (!self) throw new Error('文件夹不存在')
+  if (parentId != null) {
+    const p = database.prepare('SELECT id FROM notebooks WHERE id = ?').get(parentId) as { id: number } | undefined
+    if (!p) throw new Error('目标父文件夹不存在')
+    if (notebookIsDescendant(database, notebookId, parentId)) {
+      throw new Error('不能将父文件夹移动到其子文件夹中')
+    }
+  }
+  database.prepare('UPDATE notebooks SET parent_id = ?, updated_at = datetime(\'now\') WHERE id = ?').run(parentId, notebookId)
+}
+
+export function moveBookshelfItemToNotebook(itemId: number, notebookId: number): void {
+  const database = getDb()
+  const nb = database.prepare('SELECT id FROM notebooks WHERE id = ?').get(notebookId) as { id: number } | undefined
+  if (!nb) throw new Error('目标文件夹不存在')
+  const row = database
+    .prepare('SELECT id, project_id FROM items WHERE id = ?')
+    .get(itemId) as { id: number; project_id: number | null } | undefined
+  if (!row) throw new Error('条目不存在')
+  if (row.project_id != null) throw new Error('仅能移动书柜内全局条目')
+  database
+    .prepare('UPDATE items SET notebook_id = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    .run(notebookId, itemId)
+}
+
+export function deleteBookshelfGlobalItem(itemId: number): void {
+  const database = getDb()
+  const row = database.prepare('SELECT id, project_id FROM items WHERE id = ?').get(itemId) as
+    | { id: number; project_id: number | null }
+    | undefined
+  if (!row) throw new Error('条目不存在')
+  if (row.project_id != null) throw new Error('非书柜全局条目')
+  database.prepare('DELETE FROM node_relations WHERE source_id = ? OR target_id = ?').run(itemId, itemId)
+  database.prepare('DELETE FROM node_tags WHERE node_id = ?').run(itemId)
+  database.prepare('DELETE FROM items WHERE id = ?').run(itemId)
+}
+
+export function duplicateBookshelfNote(sourceId: number): number {
+  const database = getDb()
+  const row = database
+    .prepare(
+      'SELECT notebook_id, project_id, type, title, content_text, content_json FROM items WHERE id = ?'
+    )
+    .get(sourceId) as
+    | {
+        notebook_id: number
+        project_id: number | null
+        type: ItemRow['type']
+        title: string
+        content_text: string
+        content_json: string
+      }
+    | undefined
+  if (!row) throw new Error('笔记不存在')
+  if (row.project_id != null) throw new Error('仅可复制书柜笔记')
+  if (row.type !== 'note') throw new Error('仅支持笔记')
+  const base = row.title?.trim() || '未命名笔记'
+  const title = `${base} 副本`
+  let mergedJson = JSON.stringify({ title })
+  try {
+    const p = row.content_json?.trim() ? (JSON.parse(row.content_json) as Record<string, unknown>) : {}
+    mergedJson = JSON.stringify({ ...p, title })
+  } catch {
+    mergedJson = JSON.stringify({ title })
+  }
+  const body = row.content_text || '<p><br></p>'
+  const newId = insertNoteItem({
+    notebookId: row.notebook_id,
+    projectId: null,
+    title,
+    contentText: body,
+    tags: []
+  })
+  database.prepare(`UPDATE items SET content_json = ?, updated_at = datetime('now') WHERE id = ?`).run(mergedJson, newId)
+  return newId
+}
+
+export function renameBookshelfItem(itemId: number, nextTitle: string): void {
+  const database = getDb()
+  const row = database
+    .prepare('SELECT id, project_id, type, content_json FROM items WHERE id = ?')
+    .get(itemId) as
+    | { id: number; project_id: number | null; type: ItemRow['type']; content_json: string }
+    | undefined
+  if (!row) throw new Error('条目不存在')
+  if (row.project_id != null) throw new Error('非书柜全局条目')
+  const t = nextTitle.trim() || '未命名'
+  let contentJson = row.content_json || ''
+  if (row.type === 'note' || row.type === 'file') {
+    try {
+      const p = contentJson ? (JSON.parse(contentJson) as Record<string, unknown>) : {}
+      contentJson = JSON.stringify({ ...p, title: t })
+    } catch {
+      contentJson = JSON.stringify({ title: t })
+    }
+  }
+  database
+    .prepare(`UPDATE items SET title = @title, content_json = @content_json, updated_at = datetime('now') WHERE id = @id`)
+    .run({ id: itemId, title: t, content_json: contentJson })
+}
+
 export function listBookshelfItems(notebookId: number): ItemRow[] {
   const database = getDb()
   return database
     .prepare(
       `
-      SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+      SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at
       FROM items
       WHERE notebook_id = @notebookId AND project_id IS NULL
-      ORDER BY datetime(created_at) DESC, id DESC
+      ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
       LIMIT 1000
     `
     )
     .all({ notebookId }) as ItemRow[]
+}
+
+export function listAllBookshelfGlobalItems(): ItemRow[] {
+  const database = getDb()
+  return database
+    .prepare(
+      `
+      SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at
+      FROM items
+      WHERE project_id IS NULL
+      ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
+      LIMIT 2000
+    `
+    )
+    .all() as ItemRow[]
 }
 
 export function listBookshelfImportCandidates(): ItemRow[] {
@@ -831,7 +963,7 @@ export function listBookshelfImportCandidates(): ItemRow[] {
   return database
     .prepare(
       `
-      SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+      SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at
       FROM items
       WHERE project_id IS NULL
         AND type IN ('file', 'document')
@@ -855,10 +987,10 @@ export function listProjectNotes(projectId: number): ItemRow[] {
   return database
     .prepare(
       `
-      SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+      SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at
       FROM items
       WHERE project_id = @pid AND type = 'note'
-      ORDER BY datetime(created_at) DESC, id DESC
+      ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
       LIMIT 500
     `
     )
@@ -867,6 +999,7 @@ export function listProjectNotes(projectId: number): ItemRow[] {
 
 export type ItemRow = {
   id: number
+  notebook_id?: number
   project_id: number | null
   type: 'note' | 'excel_row' | 'document' | 'file'
   title: string
@@ -874,15 +1007,7 @@ export type ItemRow = {
   content_json: string
   source_file_path: string
   created_at: string
-}
-
-type InsertExcelRowInput = {
-  notebookId: number
-  projectId: number
-  sourceFilePath: string
-  sourceRowIndex: number
-  contentText: string
-  contentJson: string
+  updated_at?: string
 }
 
 export function getDefaultNotebookId(): number {
@@ -897,6 +1022,15 @@ export function getDefaultNotebookId(): number {
     .prepare("INSERT INTO notebooks (name, description) VALUES ('默认笔记本', '自动创建')")
     .run()
   return Number(result.lastInsertRowid)
+}
+
+export type InsertExcelRowInput = {
+  notebookId: number
+  projectId: number
+  sourceFilePath: string
+  sourceRowIndex: number
+  contentText: string
+  contentJson: string
 }
 
 export function insertExcelRows(rows: InsertExcelRowInput[]): number {
@@ -1257,7 +1391,7 @@ export function getNodeDetail(nodeId: number): NodeDetailRow {
   const database = getDb()
   const item = database
     .prepare(
-      'SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at FROM items WHERE id = ?'
+      'SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at FROM items WHERE id = ?'
     )
     .get(nodeId) as ItemRow | undefined
   if (!item) throw new Error(`节点不存在: ${nodeId}`)

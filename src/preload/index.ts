@@ -10,6 +10,7 @@ export type NotebookRow = {
 
 export type ItemRow = {
   id: number
+  notebook_id?: number
   project_id: number | null
   type: 'note' | 'excel_row' | 'document' | 'file'
   title: string
@@ -17,6 +18,7 @@ export type ItemRow = {
   content_json: string
   source_file_path: string
   created_at: string
+  updated_at?: string
 }
 
 export type ImportResult = {
@@ -321,6 +323,18 @@ const api = {
     ipcRenderer.invoke('bookshelf:notebook:delete', id),
   listBookshelfItems: (notebookId: number): Promise<{ success: boolean; data: ItemRow[] }> =>
     ipcRenderer.invoke('bookshelf:items:list', notebookId),
+  listAllBookshelfGlobalItems: (): Promise<{ success: boolean; message?: string; data: ItemRow[] }> =>
+    ipcRenderer.invoke('bookshelf:items:list-all'),
+  moveBookshelfNotebook: (notebookId: number, parentId: number | null): Promise<ActionResult> =>
+    ipcRenderer.invoke('bookshelf:notebook:move', notebookId, parentId),
+  moveBookshelfItem: (itemId: number, notebookId: number): Promise<ActionResult> =>
+    ipcRenderer.invoke('bookshelf:item:move', itemId, notebookId),
+  deleteBookshelfItem: (itemId: number): Promise<ActionResult> =>
+    ipcRenderer.invoke('bookshelf:item:delete', itemId),
+  duplicateBookshelfNote: (itemId: number): Promise<ActionResult & { data?: { id: number } }> =>
+    ipcRenderer.invoke('bookshelf:note:duplicate', itemId),
+  renameBookshelfItem: (itemId: number, title: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('bookshelf:item:rename', itemId, title),
   listBookshelfImportCandidates: (): Promise<{ success: boolean; data: ItemRow[] }> =>
     ipcRenderer.invoke('bookshelf:import:candidates'),
   importFileIntoBookshelf: (notebookId: number, filePath: string): Promise<ImportResult> =>
