@@ -133,6 +133,18 @@ export type DashboardUiPersistV1 = {
   aggregateType: 'sum' | 'avg' | 'count'
 }
 
+export type ChartCardKind = 'category_pie' | 'group_bar'
+
+export type ChartCardConfig = {
+  id: string
+  kind: ChartCardKind
+  title?: string
+  catField?: string
+  groupField?: string
+  aggregateField?: string
+  aggregateType?: 'sum' | 'avg' | 'count'
+}
+
 export type ProjectUiStateV1 = {
   dashboard: DashboardUiPersistV1
   workspace: {
@@ -140,7 +152,35 @@ export type ProjectUiStateV1 = {
     searchKeyword: string
   }
   aiCurrentTopicId: number | null
-  chartConfigurations?: unknown[]
+  chartConfigurations?: ChartCardConfig[]
+}
+
+function parseChartConfigurations(input: unknown): ChartCardConfig[] | undefined {
+  if (input === undefined) return undefined
+  if (input === null) return []
+  if (!Array.isArray(input)) return []
+  const out: ChartCardConfig[] = []
+  for (const item of input) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const o = item as Record<string, unknown>
+    const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : `c_${Math.random().toString(36).slice(2, 11)}`
+    const kind: ChartCardKind | null =
+      o.kind === 'group_bar' ? 'group_bar' : o.kind === 'category_pie' ? 'category_pie' : null
+    if (!kind) continue
+    const aggRaw = String(o.aggregateType ?? 'sum').toLowerCase()
+    const aggregateType: ChartCardConfig['aggregateType'] =
+      aggRaw === 'avg' || aggRaw === 'average' ? 'avg' : aggRaw === 'count' ? 'count' : 'sum'
+    out.push({
+      id,
+      kind,
+      title: typeof o.title === 'string' ? o.title : undefined,
+      catField: typeof o.catField === 'string' ? o.catField : undefined,
+      groupField: typeof o.groupField === 'string' ? o.groupField : undefined,
+      aggregateField: typeof o.aggregateField === 'string' ? o.aggregateField : undefined,
+      aggregateType
+    })
+  }
+  return out
 }
 
 function defaultDashboardUi(): DashboardUiPersistV1 {
@@ -157,8 +197,7 @@ function defaultProjectUiState(): ProjectUiStateV1 {
   return {
     dashboard: defaultDashboardUi(),
     workspace: { tableFilter: 'all', searchKeyword: '' },
-    aiCurrentTopicId: null,
-    chartConfigurations: []
+    aiCurrentTopicId: null
   }
 }
 
@@ -192,7 +231,9 @@ export function getProjectUiState(projectId: number): ProjectUiStateV1 {
           : parsed.aiCurrentTopicId === null
             ? null
             : base.aiCurrentTopicId,
-      chartConfigurations: Array.isArray(parsed.chartConfigurations) ? parsed.chartConfigurations : []
+      chartConfigurations: parseChartConfigurations(
+        'chartConfigurations' in (parsed as object) ? (parsed as { chartConfigurations?: unknown }).chartConfigurations : undefined
+      )
     }
   } catch {
     return defaultProjectUiState()
@@ -213,7 +254,7 @@ export function saveProjectUiState(projectId: number, state: ProjectUiStateV1): 
       ...defaultProjectUiState().workspace,
       ...state.workspace
     },
-    chartConfigurations: Array.isArray(state.chartConfigurations) ? state.chartConfigurations : []
+    chartConfigurations: state.chartConfigurations
   }
   database
     .prepare(`

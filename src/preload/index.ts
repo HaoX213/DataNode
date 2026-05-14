@@ -180,6 +180,19 @@ export type DashboardUiPersistV1 = {
   aggregateType: 'sum' | 'avg' | 'count'
 }
 
+/** 仪表盘可拖拽图表卡片（ECharts） */
+export type ChartCardKind = 'category_pie' | 'group_bar'
+
+export type ChartCardConfig = {
+  id: string
+  kind: ChartCardKind
+  title?: string
+  catField?: string
+  groupField?: string
+  aggregateField?: string
+  aggregateType?: 'sum' | 'avg' | 'count'
+}
+
 export type ProjectUiStateV1 = {
   dashboard: DashboardUiPersistV1
   workspace: {
@@ -187,7 +200,8 @@ export type ProjectUiStateV1 = {
     searchKeyword: string
   }
   aiCurrentTopicId: number | null
-  chartConfigurations?: unknown[]
+  /** 未写入过该字段的旧数据为 undefined，由前端按当前 dashboard 生成默认两张卡 */
+  chartConfigurations?: ChartCardConfig[]
 }
 
 export type AiTopicRow = {

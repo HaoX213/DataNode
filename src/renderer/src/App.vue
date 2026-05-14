@@ -4,7 +4,7 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, onUnmounted, r
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DashboardView from './components/DashboardView.vue'
 import RawDataView from './components/RawDataView.vue'
-import type { AiMessageRow, AiTopicRow, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
+import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
 import {
   Aim,
   Close,
@@ -153,6 +153,8 @@ const copilotVisible = ref(false)
 const copilotMaximized = ref(false)
 const copilotTopicsCollapsed = ref(false)
 const savedDashboardState = ref<DashboardUiPersistV1>(emptyDashboard())
+/** undefined：数据库从未写入 chartConfigurations（旧数据），由子组件生成默认卡片 */
+const chartConfigurationsState = ref<ChartCardConfig[] | undefined>(undefined)
 const aiTopics = ref<AiTopicRow[]>([])
 const activeAiTopicId = ref<number | null>(null)
 let projectUiPersistTimer: ReturnType<typeof setTimeout> | null = null
@@ -445,17 +447,23 @@ async function loadProjectUiFromDb(projectId: number): Promise<void> {
     searchKeyword.value = d.workspace?.searchKeyword ?? ''
     activeAiTopicId.value =
       typeof d.aiCurrentTopicId === 'number' && Number.isFinite(d.aiCurrentTopicId) ? d.aiCurrentTopicId : null
+    chartConfigurationsState.value = d.chartConfigurations
   } else {
     savedDashboardState.value = emptyDashboard()
     currentTableFilter.value = 'all'
     searchKeyword.value = ''
     activeAiTopicId.value = null
+    chartConfigurationsState.value = undefined
   }
 }
 
 async function persistCurrentProjectUiState(projectId: number): Promise<void> {
-  const inst = dashboardRef.value as unknown as { getPersistableDashboard?: () => DashboardUiPersistV1 } | null
+  const inst = dashboardRef.value as unknown as {
+    getPersistableDashboard?: () => DashboardUiPersistV1
+    getPersistableChartConfigurations?: () => ChartCardConfig[]
+  } | null
   const dash = inst?.getPersistableDashboard?.() ?? savedDashboardState.value
+  const charts = inst?.getPersistableChartConfigurations?.() ?? chartConfigurationsState.value ?? []
   const state: ProjectUiStateV1 = {
     dashboard: { ...emptyDashboard(), ...dash },
     workspace: {
@@ -463,9 +471,10 @@ async function persistCurrentProjectUiState(projectId: number): Promise<void> {
       searchKeyword: searchKeyword.value
     },
     aiCurrentTopicId: activeAiTopicId.value,
-    chartConfigurations: []
+    chartConfigurations: charts
   }
   savedDashboardState.value = state.dashboard
+  chartConfigurationsState.value = charts
   const res = await window.api.saveProjectUiState(projectId, state)
   if (!res.success && res.message) {
     console.warn(res.message)
@@ -490,8 +499,12 @@ function coerceTableFilterForAvailableTypes(): void {
   }
 }
 
-function onDashboardPersist(payload: DashboardUiPersistV1): void {
-  savedDashboardState.value = payload
+function onDashboardPersist(payload: {
+  dashboard: DashboardUiPersistV1
+  chartConfigurations: ChartCardConfig[]
+}): void {
+  savedDashboardState.value = payload.dashboard
+  chartConfigurationsState.value = payload.chartConfigurations
   schedulePersistProjectUi()
 }
 
@@ -2155,6 +2168,7 @@ onUnmounted(() => {
             ref="dashboardRef"
             :project-id="currentProjectId"
             :saved-dashboard="savedDashboardState"
+            :saved-chart-configurations="chartConfigurationsState"
             @refresh="refreshItems"
             @dashboard-persist="onDashboardPersist"
           />
