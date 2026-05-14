@@ -15,6 +15,15 @@ AI 所依据的内容来源包括：
 
 业务数据与对话记录均保存在本机数据库文件中（见首次启动时选择的数据目录）。
 
+## 数据导入格式
+
+- **结构化表格（推荐）**：**Excel**（`.xlsx` / `.xls`）、**CSV**、**JSON**（表格型对象数组）。导入后写入 SQLite 中的 `excel_row` 等记录，供统计仪表盘与 AI 统计摘要使用。
+- **其他**：纯文本（`.txt`）、Word（`.docx`）等可在文件菜单中选择导入；部分格式需结合项目内 AI 解析或使用「应用 JSON 入库」，不属于一键表格导入。
+
+## 后续规划（自建 Notebook）
+
+当前版本**不提供**类 Jupyter 的「自建 Notebook」（在应用内编写 Python 等代码做自定义分析）。该能力已列为后续迭代的重要方向；后续接入时可在主进程侧预留安全的运行时或与外部内核通信，而不改变现有「统计引擎 + 本地库」数据路径。
+
 ## Recommended IDE Setup
 
 - [VSCode](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode) + [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar)

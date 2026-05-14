@@ -427,7 +427,7 @@ const copilotModeBadge = computed(() => {
       .filter((n): n is string => Boolean(n))
       .slice(0, 5)
     const tail = ids.length > 5 ? ` 等 ${ids.length} 个` : ''
-    return `全局 AI (关联: ${names.join('、')}${tail})`
+    return `全局 AI（关联项目：${names.join('、')}${tail}）`
   }
   return `项目 AI · ${currentProject.value?.name ?? '—'}`
 })
@@ -2305,7 +2305,7 @@ onUnmounted(() => {
             <el-button text class="menu-button">文件</el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="import" :icon="Upload">导入数据 (Excel/CSV/JSON/TXT…)</el-dropdown-item>
+                <el-dropdown-item command="import" :icon="Upload">导入表格数据（Excel · CSV · JSON）</el-dropdown-item>
                 <el-dropdown-item command="import" :icon="FolderOpened">导入文档 / 文件</el-dropdown-item>
                 <el-dropdown-item command="open-data-folder" :icon="FolderOpened">打开数据文件夹</el-dropdown-item>
                 <el-dropdown-item command="note" :icon="DocumentAdd">新建笔记</el-dropdown-item>
@@ -2528,19 +2528,19 @@ onUnmounted(() => {
             <template v-if="copilotMode === 'global'">
               <div class="global-ai-linked-block">
                 <div class="copilot-section-title">关联项目</div>
-                <el-select
+                <div v-if="!projects.length" class="global-ai-linked-empty">暂无项目，请先创建并导入数据</div>
+                <el-checkbox-group
+                  v-else
                   v-model="globalLinkedProjectIds"
-                  multiple
-                  collapse-tags
-                  :max-collapse-tags="2"
-                  placeholder="多选项目，合并表格分析"
-                  class="global-linked-project-select"
+                  class="global-linked-project-checkboxes"
                   @change="onGlobalLinkedProjectsChange"
                 >
-                  <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
-                </el-select>
+                  <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-linked-project-cb">
+                    {{ p.name }}
+                  </el-checkbox>
+                </el-checkbox-group>
                 <p class="global-ai-linked-hint">
-                  将所选项目的 excel_row 合并注入上下文（含 _DataNodeProjectId），可进行跨项目对比与排行类问答。
+                  勾选后，全局 AI 会通过主进程统计引擎合并多项目的结构化行（Excel / CSV / JSON 导入的 excel_row，含 _DataNodeProjectId），用于跨项目对比与排行类问题。
                 </p>
                 <div class="copilot-section-title copilot-section-title--sub">全局对话历史</div>
               </div>
@@ -3329,8 +3329,26 @@ onUnmounted(() => {
   margin-bottom: 0;
 }
 
-.global-linked-project-select {
-  width: 100%;
+.global-ai-linked-empty {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+
+.global-linked-project-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow: auto;
+  padding: 4px 2px;
+}
+
+.global-linked-project-cb {
+  margin-right: 0;
+  height: auto;
+  align-items: flex-start;
+  line-height: 1.35;
 }
 
 .global-ai-linked-hint {

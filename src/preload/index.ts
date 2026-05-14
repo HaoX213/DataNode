@@ -203,6 +203,8 @@ export type ChartCardConfig = {
   legendPosition?: ChartLegendPosition
   cardWidthPx?: number
   chartHeightPx?: number
+  titleFontSize?: number
+  axisFontSize?: number
 }
 
 export type ProjectUiStateV1 = {

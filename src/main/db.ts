@@ -175,6 +175,10 @@ export type ChartCardConfig = {
   legendPosition?: ChartLegendPosition
   cardWidthPx?: number
   chartHeightPx?: number
+  /** 标题字号 */
+  titleFontSize?: number
+  /** 坐标轴标签字号 */
+  axisFontSize?: number
 }
 
 export type ProjectUiStateV1 = {
@@ -216,6 +220,14 @@ function parseChartConfigurations(input: unknown): ChartCardConfig[] | undefined
       typeof o.chartHeightPx === 'number' && Number.isFinite(o.chartHeightPx)
         ? Math.min(800, Math.max(120, Math.round(o.chartHeightPx)))
         : undefined
+    const titleFontSize =
+      typeof o.titleFontSize === 'number' && Number.isFinite(o.titleFontSize)
+        ? Math.min(22, Math.max(10, Math.round(o.titleFontSize)))
+        : undefined
+    const axisFontSize =
+      typeof o.axisFontSize === 'number' && Number.isFinite(o.axisFontSize)
+        ? Math.min(18, Math.max(8, Math.round(o.axisFontSize)))
+        : undefined
     out.push({
       id,
       kind,
@@ -230,7 +242,9 @@ function parseChartConfigurations(input: unknown): ChartCardConfig[] | undefined
       color: typeof o.color === 'string' ? o.color : undefined,
       legendPosition,
       cardWidthPx,
-      chartHeightPx
+      chartHeightPx,
+      titleFontSize,
+      axisFontSize
     })
   }
   return out

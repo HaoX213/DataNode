@@ -33,12 +33,18 @@ const draggingCardIndex = ref<number | null>(null)
 const chartEditorVisible = ref(false)
 const chartEditorForm = ref<ChartCardConfig | null>(null)
 
-const CARD_W_DEF = 400
-const CARD_H_DEF = 280
+const CARD_W_DEF = 440
+const CARD_H_DEF = 300
 const CARD_W_MIN = 280
 const CARD_W_MAX = 720
 const CARD_H_MIN = 160
 const CARD_H_MAX = 560
+const TITLE_FS_DEF = 14
+const TITLE_FS_MIN = 10
+const TITLE_FS_MAX = 22
+const AXIS_FS_DEF = 12
+const AXIS_FS_MIN = 8
+const AXIS_FS_MAX = 18
 
 type ResizeState = { cardId: string; startX: number; startY: number; startW: number; startH: number }
 let resizeState: ResizeState | null = null
@@ -59,7 +65,9 @@ function defaultCardsFromDashboard(d: DashboardUiPersistV1): ChartCardConfig[] {
       legendPosition: 'bottom',
       color: '#6366f1',
       cardWidthPx: CARD_W_DEF,
-      chartHeightPx: CARD_H_DEF
+      chartHeightPx: CARD_H_DEF,
+      titleFontSize: TITLE_FS_DEF,
+      axisFontSize: AXIS_FS_DEF
     },
     {
       id: genId(),
@@ -72,7 +80,9 @@ function defaultCardsFromDashboard(d: DashboardUiPersistV1): ChartCardConfig[] {
       legendPosition: 'bottom',
       color: '#6366f1',
       cardWidthPx: CARD_W_DEF,
-      chartHeightPx: CARD_H_DEF
+      chartHeightPx: CARD_H_DEF,
+      titleFontSize: TITLE_FS_DEF,
+      axisFontSize: AXIS_FS_DEF
     }
   ]
 }
@@ -98,6 +108,14 @@ function sanitizeCard(c: ChartCardConfig, fields: { all: string[]; numeric: stri
       ? Math.min(CARD_H_MAX, Math.max(CARD_H_MIN, Math.round(c.chartHeightPx)))
       : CARD_H_DEF
   const color = typeof c.color === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c.color.trim()) ? c.color.trim() : '#6366f1'
+  const titleFontSize =
+    typeof c.titleFontSize === 'number' && Number.isFinite(c.titleFontSize)
+      ? Math.min(TITLE_FS_MAX, Math.max(TITLE_FS_MIN, Math.round(c.titleFontSize)))
+      : TITLE_FS_DEF
+  const axisFontSize =
+    typeof c.axisFontSize === 'number' && Number.isFinite(c.axisFontSize)
+      ? Math.min(AXIS_FS_MAX, Math.max(AXIS_FS_MIN, Math.round(c.axisFontSize)))
+      : AXIS_FS_DEF
   const base: ChartCardConfig = {
     ...c,
     chartStyle,
@@ -105,7 +123,9 @@ function sanitizeCard(c: ChartCardConfig, fields: { all: string[]; numeric: stri
     color,
     cardWidthPx: w,
     chartHeightPx: h,
-    aggregateType: agg
+    aggregateType: agg,
+    titleFontSize,
+    axisFontSize
   }
   if (c.kind === 'category_pie') {
     const cf = c.catField?.trim() ?? ''
@@ -177,12 +197,13 @@ function scheduleCardChartsRefresh(): void {
   }, 140)
 }
 
-function legendEchartsOption(pos: ChartLegendPosition | undefined): Record<string, unknown> {
+function legendEchartsOption(pos: ChartLegendPosition | undefined, legendFontSize: number): Record<string, unknown> {
   const p = pos ?? 'bottom'
-  if (p === 'top') return { type: 'scroll', top: 4 }
-  if (p === 'left') return { type: 'scroll', left: 4, orient: 'vertical' }
-  if (p === 'right') return { type: 'scroll', right: 4, orient: 'vertical' }
-  return { type: 'scroll', bottom: 0 }
+  const textStyle = { fontSize: legendFontSize }
+  if (p === 'top') return { type: 'scroll', top: 4, textStyle }
+  if (p === 'left') return { type: 'scroll', left: 4, orient: 'vertical', textStyle }
+  if (p === 'right') return { type: 'scroll', right: 4, orient: 'vertical', textStyle }
+  return { type: 'scroll', bottom: 0, textStyle }
 }
 
 function onResizeMove(ev: MouseEvent): void {
@@ -282,7 +303,9 @@ async function refreshCardChart(cardId: string): Promise<void> {
 
   const titleText = card.title?.trim()
   const pal = card.color ?? '#6366f1'
-  const leg = legendEchartsOption(card.legendPosition)
+  const titleFs = card.titleFontSize ?? TITLE_FS_DEF
+  const axisFs = card.axisFontSize ?? AXIS_FS_DEF
+  const leg = legendEchartsOption(card.legendPosition, axisFs)
 
   if (card.kind === 'category_pie') {
     const f = (card.catField ?? '').trim()
@@ -301,7 +324,7 @@ async function refreshCardChart(cardId: string): Promise<void> {
     if (style === 'pie') {
       inst.setOption({
         color: [pal, '#8b5cf6', '#0ea5e9', '#f59e0b', '#10b981', '#ef4444'],
-        title: { text: titleText || `「${f}」分布`, left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: titleText || `「${f}」分布`, left: 'center', textStyle: { fontSize: titleFs } },
         tooltip: { trigger: 'item' },
         legend: { ...leg, data: data.map((d) => d.name) },
         series: [{ type: 'pie', radius: ['30%', '58%'], data }]
@@ -309,16 +332,22 @@ async function refreshCardChart(cardId: string): Promise<void> {
     } else {
       inst.setOption({
         color: [pal],
-        title: { text: titleText || `「${f}」计数`, left: 'center', textStyle: { fontSize: 14 } },
+        title: { text: titleText || `「${f}」计数`, left: 'center', textStyle: { fontSize: titleFs } },
         tooltip: { trigger: 'axis' },
         legend: { show: false },
         xAxis: {
           type: 'category',
           data: data.map((d) => d.name),
           name: card.xAxisName?.trim() || f,
-          axisLabel: { rotate: 24 }
+          nameTextStyle: { fontSize: axisFs },
+          axisLabel: { rotate: 24, fontSize: axisFs }
         },
-        yAxis: { type: 'value', name: card.yAxisName?.trim() || '计数' },
+        yAxis: {
+          type: 'value',
+          name: card.yAxisName?.trim() || '计数',
+          nameTextStyle: { fontSize: axisFs },
+          axisLabel: { fontSize: axisFs }
+        },
         series: [{ type: 'bar', data: data.map((d) => d.value), itemStyle: { color: pal } }]
       })
     }
@@ -350,7 +379,7 @@ async function refreshCardChart(cardId: string): Promise<void> {
       title: {
         text: titleText || `${aggLabel}(${af}) · 按 ${gf}`,
         left: 'center',
-        textStyle: { fontSize: 14 }
+        textStyle: { fontSize: titleFs }
       },
       tooltip: { trigger: 'axis' },
       legend: { show: false },
@@ -360,11 +389,14 @@ async function refreshCardChart(cardId: string): Promise<void> {
         name: card.xAxisName?.trim() || gf,
         nameLocation: 'middle',
         nameGap: 28,
-        axisLabel: { rotate: 28 }
+        nameTextStyle: { fontSize: axisFs },
+        axisLabel: { rotate: 28, fontSize: axisFs }
       },
       yAxis: {
         type: 'value',
-        name: card.yAxisName?.trim() || `${aggLabel}(${af})`
+        name: card.yAxisName?.trim() || `${aggLabel}(${af})`,
+        nameTextStyle: { fontSize: axisFs },
+        axisLabel: { fontSize: axisFs }
       },
       series: [
         {
@@ -501,7 +533,9 @@ function addChartCard(kind: ChartCardKind): void {
       legendPosition: 'bottom',
       color: '#6366f1',
       cardWidthPx: CARD_W_DEF,
-      chartHeightPx: CARD_H_DEF
+      chartHeightPx: CARD_H_DEF,
+      titleFontSize: TITLE_FS_DEF,
+      axisFontSize: AXIS_FS_DEF
     })
   } else {
     chartCards.value.push({
@@ -515,7 +549,9 @@ function addChartCard(kind: ChartCardKind): void {
       legendPosition: 'bottom',
       color: '#6366f1',
       cardWidthPx: CARD_W_DEF,
-      chartHeightPx: CARD_H_DEF
+      chartHeightPx: CARD_H_DEF,
+      titleFontSize: TITLE_FS_DEF,
+      axisFontSize: AXIS_FS_DEF
     })
   }
   schedulePersistEmit()
@@ -792,6 +828,12 @@ defineExpose({
             <el-option label="左侧" value="left" />
             <el-option label="右侧" value="right" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="标题字号">
+          <el-input-number v-model="chartEditorForm.titleFontSize" :min="TITLE_FS_MIN" :max="TITLE_FS_MAX" :step="1" />
+        </el-form-item>
+        <el-form-item label="坐标轴 / 图例字号">
+          <el-input-number v-model="chartEditorForm.axisFontSize" :min="AXIS_FS_MIN" :max="AXIS_FS_MAX" :step="1" />
         </el-form-item>
         <el-form-item label="卡片宽度 (px)">
           <el-input-number v-model="chartEditorForm.cardWidthPx" :min="CARD_W_MIN" :max="CARD_W_MAX" :step="10" />
