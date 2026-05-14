@@ -4,29 +4,10 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, onUnmounted, r
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DashboardView from './components/DashboardView.vue'
 import RawDataView from './components/RawDataView.vue'
+import BookshelfView from './components/BookshelfView.vue'
+import NoteEditorShell from './components/NoteEditorShell.vue'
 import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
-import {
-  Aim,
-  Close,
-  Collection,
-  Delete,
-  Document,
-  DocumentAdd,
-  EditPen,
-  Filter,
-  Fold,
-  FolderOpened,
-  FullScreen,
-  Hide,
-  MagicStick,
-  MoreFilled,
-  Plus,
-  Refresh,
-  Search,
-  Upload,
-  Expand,
-  View
-} from '@element-plus/icons-vue'
+import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, MagicStick, MoreFilled, Plus, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
 
 type ItemRow = {
   id: number
@@ -130,8 +111,6 @@ const COPILOT_WELCOME_GLOBAL: ChatMessage = {
 const loading = ref(false)
 const importing = ref(false)
 const searching = ref(false)
-const savingNote = ref(false)
-const savingLayout = ref(false)
 const savingNodeDetail = ref(false)
 const settingsVisible = ref(false)
 const settingsLoading = ref(false)
@@ -150,9 +129,12 @@ const initialStorageLoading = ref(false)
 const sidebarCollapsed = ref(false)
 const creatingProject = ref(false)
 const projects = ref<ProjectRow[]>([])
+const shellMode = ref<'bookshelf' | 'project'>('bookshelf')
 const currentProjectId = ref<number | null>(null)
-const workspaceTab = ref<'dashboard' | 'raw' | 'graph'>('dashboard')
-const isGraphOpen = computed(() => workspaceTab.value === 'graph')
+const bookshelfRef = ref<InstanceType<typeof BookshelfView> | null>(null)
+const workspaceTab = ref<'dashboard' | 'raw' | 'notes'>('dashboard')
+/** 项目内嵌图谱已迁到书柜；保留 false 以兼容遗留分支 */
+const isGraphOpen = computed(() => false)
 const dashboardRef = ref<InstanceType<typeof DashboardView> | null>(null)
 const pendingAiImport = ref<{ preview: string; path: string } | null>(null)
 const copilotVisible = ref(false)
@@ -169,6 +151,12 @@ const aiTopics = ref<AiTopicRow[]>([])
 const activeAiTopicId = ref<number | null>(null)
 const activeGlobalAiTopicId = ref<number | null>(null)
 const globalLinkedProjectIds = ref<number[]>([])
+const globalLinkedDraftIds = ref<number[]>([])
+const globalLinkedDrawerVisible = ref(false)
+const projectNotesList = ref<ItemRow[]>([])
+const importChoiceDialogVisible = ref(false)
+const bookshelfPickForImportVisible = ref(false)
+const bookshelfImportCandidates = ref<ItemRow[]>([])
 let globalLinkedPersistTimer: ReturnType<typeof setTimeout> | null = null
 let projectUiPersistTimer: ReturnType<typeof setTimeout> | null = null
 const chatSending = ref(false)
@@ -199,10 +187,11 @@ const allTags = shallowRef<Array<{ id: number; name: string; color: string }>>([
 const isFocusMode = ref(false)
 const focusNodeName = ref('')
 const searchKeyword = ref('')
-const noteDialogVisible = ref(false)
-const noteTitle = ref('')
-const noteContent = ref('')
-const noteTagsInput = ref('')
+const noteEditorOpen = ref(false)
+const noteEditorId = ref<number | null>(null)
+const noteEditorNotebookId = ref(0)
+const noteEditorProjectId = ref<number | null>(null)
+const noteEditorTitleSeed = ref('')
 const showMetadata = ref(false)
 const graphContainer = ref<HTMLDivElement | null>(null)
 const chatMessagesContainer = ref<HTMLDivElement | null>(null)
@@ -431,6 +420,11 @@ const copilotModeBadge = computed(() => {
   }
   return `项目 AI · ${currentProject.value?.name ?? '—'}`
 })
+
+function openGlobalLinkedDrawer(): void {
+  globalLinkedDraftIds.value = [...globalLinkedProjectIds.value]
+  globalLinkedDrawerVisible.value = true
+}
 
 async function loadGlobalLinkedProjectsFromDb(): Promise<void> {
   const r = await window.api.getGlobalAiLinkedProjectIds()
@@ -842,12 +836,14 @@ const switchProject = async (projectId: number): Promise<void> => {
   }
   await loadProjectUiFromDb(projectId)
   currentProjectId.value = projectId
+  shellMode.value = 'project'
   currentNode.value = null
   selectedContextNode.value = null
   detailDrawerVisible.value = false
   isFocusMode.value = false
   workspaceTab.value = 'dashboard'
   await runSearch()
+  await loadProjectNotes()
   coerceTableFilterForAvailableTypes()
   await loadAllTags()
   if (copilotVisible.value && copilotMode.value === 'project') {
@@ -910,11 +906,6 @@ const refreshItems = async (): Promise<void> => {
   try {
     const result = await window.api.listItems(currentProjectId.value ?? undefined)
     applyRows(result)
-    try {
-      await loadGraphData(false)
-    } catch {
-      // 图谱接口异常不阻塞表格查询
-    }
   } finally {
     loading.value = false
   }
@@ -925,21 +916,102 @@ const runSearch = async (): Promise<void> => {
   try {
     const result = await window.api.listItems(currentProjectId.value ?? undefined)
     applyRows(result)
-    try {
-      await loadGraphData(false)
-    } catch {
-      // 图谱接口异常不阻塞搜索结果展示
-    }
   } finally {
     searching.value = false
   }
 }
 
-const openNoteDialog = (): void => {
-  noteTitle.value = ''
-  noteContent.value = ''
-  noteTagsInput.value = ''
-  noteDialogVisible.value = true
+function openBookshelfShell(): void {
+  shellMode.value = 'bookshelf'
+}
+
+async function loadProjectNotes(): Promise<void> {
+  if (currentProjectId.value == null) {
+    projectNotesList.value = []
+    return
+  }
+  const r = await window.api.listProjectNotes(currentProjectId.value)
+  projectNotesList.value = r.success ? r.data ?? [] : []
+}
+
+function openNoteEditor(payload: {
+  id: number | null
+  notebookId: number
+  projectId: number | null
+  title?: string
+}): void {
+  noteEditorId.value = payload.id
+  noteEditorNotebookId.value = payload.notebookId
+  noteEditorProjectId.value = payload.projectId
+  noteEditorTitleSeed.value = payload.title ?? ''
+  noteEditorOpen.value = true
+}
+
+async function onNoteEditorSaved(payload: { id: number; isNew: boolean }): Promise<void> {
+  if (payload.isNew) {
+    noteEditorId.value = payload.id
+  }
+  await runSearch()
+  await loadProjectNotes()
+  await bookshelfRef.value?.refreshLibrary?.()
+}
+
+function onNoteEditorClosed(): void {
+  noteEditorOpen.value = false
+}
+
+async function createProjectNote(): Promise<void> {
+  if (currentProjectId.value == null) return
+  const books = await window.api.listNotebooks()
+  const nb = books[0]?.id
+  if (nb == null) {
+    ElMessage.warning('数据库中缺少笔记本记录')
+    return
+  }
+  openNoteEditor({ id: null, notebookId: nb, projectId: currentProjectId.value })
+}
+
+async function openProjectNote(id: number): Promise<void> {
+  if (currentProjectId.value == null) return
+  const books = await window.api.listNotebooks()
+  const nb = books[0]?.id
+  if (nb == null) return
+  openNoteEditor({ id, notebookId: nb, projectId: currentProjectId.value })
+}
+
+async function runProjectFileImport(filePath: string, title: string): Promise<void> {
+  const result = await window.api.importFile(filePath, title, currentProjectId.value ?? undefined)
+
+  if (result.mode === 'ai_text') {
+    pendingAiImport.value = {
+      preview: result.preview ?? '',
+      path: result.filePath ?? filePath
+    }
+    copilotMode.value = 'project'
+    copilotVisible.value = true
+    await ElMessageBox.alert(
+      '该文件需要结合 AI 理解结构。底部助手已打开并附带文本摘录。请描述列名、分隔规则或期望 JSON；模型给出 ```json 数组后可点击助手内的「应用 JSON 入库」。',
+      'AI 辅助解析',
+      { confirmButtonText: '我知道了' }
+    )
+    await runSearch()
+    return
+  }
+
+  if (!result.success) {
+    ElMessage.error(formatImportBackendMessage(result.message || '导入失败'))
+    return
+  }
+  ElMessage.success(result.message)
+  const lower = filePath.toLowerCase()
+  if (/\.(csv|json)$/.test(lower)) {
+    await ElMessageBox.alert(
+      '导入已完成。如需进一步清洗或统计，可在右下角打开 AI 助手提问；复杂排布也可请 AI 输出新的 JSON 再入库。',
+      '提示',
+      { confirmButtonText: '好的' }
+    )
+  }
+  await runSearch()
 }
 
 const startEdit = (): void => {
@@ -1072,6 +1144,7 @@ const loadStoragePath = (): void => {
 }
 
 const loadInitialData = async (): Promise<void> => {
+  shellMode.value = 'bookshelf'
   await loadProjects()
   await loadGlobalLinkedProjectsFromDb()
   const pid = currentProjectId.value
@@ -1081,6 +1154,7 @@ const loadInitialData = async (): Promise<void> => {
   await refreshItems()
   coerceTableFilterForAvailableTypes()
   await loadAllTags()
+  await loadProjectNotes()
 }
 
 const initializeStorageAndLoadApp = async (selectedPath: string): Promise<boolean> => {
@@ -1159,17 +1233,70 @@ const confirmFirstLaunchStorage = async (): Promise<void> => {
   }
 }
 
+async function importAssetToProject(): Promise<void> {
+  if (shellMode.value !== 'project' || currentProjectId.value == null) {
+    ElMessage.warning('请先进入项目工作区后再导入文档')
+    return
+  }
+  importing.value = true
+  try {
+    const picked = await window.api.pickImportFile()
+    if (!picked.success || !picked.filePath) {
+      if (picked.message) ElMessage.warning(picked.message)
+      return
+    }
+    let title = ''
+    if (!isStructuredImportPath(picked.filePath)) {
+      const promptResult = await ElMessageBox.prompt('请输入该文件的标题/摘要（必填）', '导入资产文件', {
+        confirmButtonText: '导入',
+        cancelButtonText: '取消',
+        inputPattern: /\S+/,
+        inputErrorMessage: '标题/摘要不能为空'
+      }).catch(() => null)
+      if (!promptResult) return
+      title = promptResult.value.trim()
+      if (!title) return
+    }
+    const result = await window.api.importFile(picked.filePath, title, currentProjectId.value ?? undefined)
+    if (result.mode === 'ai_text') {
+      pendingAiImport.value = {
+        preview: result.preview ?? '',
+        path: result.filePath ?? picked.filePath
+      }
+      copilotMode.value = 'project'
+      copilotVisible.value = true
+      await ElMessageBox.alert(
+        '该文件需要结合 AI 理解结构。底部助手已打开并附带文本摘录。',
+        'AI 辅助解析',
+        { confirmButtonText: '我知道了' }
+      )
+      await runSearch()
+      return
+    }
+    if (!result.success) {
+      ElMessage.error(formatImportBackendMessage(result.message || '导入失败'))
+      return
+    }
+    ElMessage.success(result.message)
+    await runSearch()
+  } catch (error) {
+    ElMessage.error(formatImportUiError(error))
+  } finally {
+    importing.value = false
+  }
+}
+
 const handleFileCommand = (command: string): void => {
   if (command === 'import') {
     void importFile()
     return
   }
-  if (command === 'open-data-folder') {
-    void openDataDirectory()
+  if (command === 'import-asset') {
+    void importAssetToProject()
     return
   }
-  if (command === 'note') {
-    openNoteDialog()
+  if (command === 'open-data-folder') {
+    void openDataDirectory()
   }
 }
 
@@ -1230,40 +1357,8 @@ const saveSettings = async (): Promise<void> => {
   }
 }
 
-const saveNote = async (): Promise<void> => {
-  const title = noteTitle.value.trim()
-  const content = noteContent.value.trim()
-  if (!content) {
-    ElMessage.warning('请先输入笔记内容')
-    return
-  }
-  const tags = noteTagsInput.value
-    .split(/[,，\s]+/)
-    .map((tag) => tag.trim())
-    .filter(Boolean)
-
-  savingNote.value = true
-  try {
-    const result = await window.api.createNote(title, content, tags, currentProjectId.value ?? undefined)
-    if (!result.success) {
-      ElMessage.warning(result.message)
-      return
-    }
-    ElMessage.success(result.message)
-    noteDialogVisible.value = false
-    noteTitle.value = ''
-    noteContent.value = ''
-    noteTagsInput.value = ''
-    await runSearch()
-    await loadGraphData(true)
-  } catch (error) {
-    ElMessage.error(`新建笔记失败：${String(error)}`)
-  } finally {
-    savingNote.value = false
-  }
-}
-
-const importFile = async (): Promise<void> => {
+async function pickLocalFileAndImport(): Promise<void> {
+  importChoiceDialogVisible.value = false
   importing.value = true
   try {
     const picked = await window.api.pickImportFile()
@@ -1271,7 +1366,6 @@ const importFile = async (): Promise<void> => {
       if (picked.message) ElMessage.warning(picked.message)
       return
     }
-
     let title = ''
     if (!isStructuredImportPath(picked.filePath)) {
       const promptResult = await ElMessageBox.prompt('请输入该文件的标题/摘要（必填）', '导入资产文件', {
@@ -1284,44 +1378,45 @@ const importFile = async (): Promise<void> => {
       title = promptResult.value.trim()
       if (!title) return
     }
-
-    const result = await window.api.importFile(picked.filePath, title, currentProjectId.value ?? undefined)
-
-    if (result.mode === 'ai_text') {
-      pendingAiImport.value = {
-        preview: result.preview ?? '',
-        path: result.filePath ?? picked.filePath
-      }
-      copilotMode.value = 'project'
-      copilotVisible.value = true
-      await ElMessageBox.alert(
-        '该文件需要结合 AI 理解结构。底部助手已打开并附带文本摘录。请描述列名、分隔规则或期望 JSON；模型给出 ```json 数组后可点击助手内的「应用 JSON 入库」。',
-        'AI 辅助解析',
-        { confirmButtonText: '我知道了' }
-      )
-      await runSearch()
-      return
-    }
-
-    if (!result.success) {
-      ElMessage.error(formatImportBackendMessage(result.message || '导入失败'))
-      return
-    }
-    ElMessage.success(result.message)
-    const lower = picked.filePath.toLowerCase()
-    if (/\.(csv|json)$/.test(lower)) {
-      await ElMessageBox.alert(
-        '导入已完成。如需进一步清洗或统计，可在右下角打开 AI 助手提问；复杂排布也可请 AI 输出新的 JSON 再入库。',
-        '提示',
-        { confirmButtonText: '好的' }
-      )
-    }
-    await runSearch()
+    await runProjectFileImport(picked.filePath, title)
   } catch (error) {
     ElMessage.error(formatImportUiError(error))
   } finally {
     importing.value = false
   }
+}
+
+async function openBookshelfImportPickerForProject(): Promise<void> {
+  importChoiceDialogVisible.value = false
+  const r = await window.api.listBookshelfImportCandidates()
+  bookshelfImportCandidates.value = r.success ? r.data ?? [] : []
+  if (!bookshelfImportCandidates.value.length) {
+    ElMessage.info('书柜中暂无可导入的结构化表格文件（Excel / CSV / JSON）')
+    return
+  }
+  bookshelfPickForImportVisible.value = true
+}
+
+async function confirmImportFromBookshelfItem(row: ItemRow): Promise<void> {
+  const path = row.source_file_path?.trim()
+  if (!path) return
+  bookshelfPickForImportVisible.value = false
+  importing.value = true
+  try {
+    await runProjectFileImport(path, '')
+  } catch (error) {
+    ElMessage.error(formatImportUiError(error))
+  } finally {
+    importing.value = false
+  }
+}
+
+const importFile = async (): Promise<void> => {
+  if (shellMode.value !== 'project' || currentProjectId.value == null) {
+    ElMessage.warning('请先点击左侧项目进入项目工作区，再导入数据')
+    return
+  }
+  importChoiceDialogVisible.value = true
 }
 
 const clearItems = async (): Promise<void> => {
@@ -1479,50 +1574,13 @@ const loadGraphData = async (renderWhenReady = true): Promise<void> => {
 
 const loadAllTags = async (): Promise<void> => {
   try {
-    const result = await window.api.getAllTags(currentProjectId.value ?? undefined)
+    const result = await window.api.getAllTags({
+      projectId: currentProjectId.value ?? undefined
+    })
     allTags.value = result.success ? cloneGraphPayload(result.data) : []
   } catch {
     allTags.value = []
   }
-}
-
-// @ts-ignore - 预留给节点详情里的局部聚焦操作
-const focusCurrentNode = async (): Promise<void> => {
-  if (!currentNode.value) return
-  try {
-    const result = await window.api.getLocalGraphData(currentNode.value.id, 1, currentProjectId.value ?? undefined)
-    if (!result.success) {
-      ElMessage.error(result.message || '局部图谱加载失败')
-      return
-    }
-    isFocusMode.value = true
-    focusNodeName.value = currentNode.value.name
-    detailDrawerVisible.value = false
-    await openGraphPanel()
-    await applyGraphData(result.data.nodes ?? [], result.data.edges ?? [], true)
-  } catch (error) {
-    ElMessage.error(`局部图谱加载失败：${String(error)}`)
-  }
-}
-
-const clearFocus = async (): Promise<void> => {
-  activeNodeId.value = null
-  if (isFocusMode.value) {
-    await loadGraphData(true)
-    return
-  }
-  updateGraphHighlight(searchKeyword.value)
-}
-
-const openGraphPanel = async (): Promise<void> => {
-  workspaceTab.value = 'graph'
-  await nextTick()
-  if (!graphInstance.value) {
-    await renderGraphFromApi()
-    return
-  }
-  resizeGraph()
-  updateGraphHighlight(searchKeyword.value)
 }
 
 const initGraph = async (nodes: GraphNode[], edges: GraphEdge[]): Promise<void> => {
@@ -1622,52 +1680,8 @@ const initGraph = async (nodes: GraphNode[], edges: GraphEdge[]): Promise<void> 
   })
 }
 
-const renderGraphFromApi = async (): Promise<void> => {
-  try {
-    await loadGraphData(true)
-  } catch (error) {
-    ElMessage.error(`图谱加载失败：${String(error)}`)
-  }
-}
-
 const resizeGraph = (): void => {
   graphInstance.value?.resize()
-}
-
-const saveGraphLayout = async (): Promise<void> => {
-  if (!graphInstance.value) {
-    ElMessage.warning('图谱尚未初始化')
-    return
-  }
-
-  savingLayout.value = true
-  try {
-    const seriesModel = (graphInstance.value as any).getModel().getSeriesByIndex(0)
-    const data = seriesModel.getData()
-    const positions: Array<{ id: number; x: number; y: number }> = []
-
-    for (let index = 0; index < data.count(); index += 1) {
-      const id = Number(data.getId(index))
-      const layout = data.getItemLayout(index)
-      const x = Array.isArray(layout) ? layout[0] : layout?.x
-      const y = Array.isArray(layout) ? layout[1] : layout?.y
-      if (Number.isFinite(id) && Number.isFinite(x) && Number.isFinite(y)) {
-        positions.push({ id, x, y })
-      }
-    }
-
-    const result = await window.api.updateNodePositions(positions)
-    if (!result.success) {
-      ElMessage.error(result.message || '布局保存失败')
-      return
-    }
-    ElMessage.success('布局保存成功')
-    await loadGraphData(false)
-  } catch (error) {
-    ElMessage.error(`布局保存失败：${String(error)}`)
-  } finally {
-    savingLayout.value = false
-  }
 }
 
 const openDetail = (data: Record<string, unknown>): void => {
@@ -2172,15 +2186,6 @@ const sendChatMessage = async (): Promise<void> => {
 }
 
 watch(workspaceTab, async (tab) => {
-  if (tab === 'graph') {
-    await nextTick()
-    if (!graphInstance.value) {
-      await renderGraphFromApi()
-    } else {
-      resizeGraph()
-      updateGraphHighlight(searchKeyword.value)
-    }
-  }
   if (tab === 'dashboard') {
     await nextTick()
     dashboardRef.value?.resizeChart()
@@ -2297,18 +2302,24 @@ onUnmounted(() => {
         <div class="brand-mark">DN</div>
         <div class="brand-copy">
           <h1>DataNode</h1>
-          <p>{{ currentProject?.name || 'Knowledge workspace' }}</p>
+          <p>
+            {{
+              shellMode === 'bookshelf'
+                ? '书柜 · 知识中心'
+                : currentProject?.name || '项目工作区'
+            }}
+          </p>
         </div>
 
         <div class="desktop-menu">
+          <el-button text class="menu-button" type="primary" @click="openBookshelfShell">书柜</el-button>
           <el-dropdown trigger="click" @command="handleFileCommand">
             <el-button text class="menu-button">文件</el-button>
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="import" :icon="Upload">导入表格数据（Excel · CSV · JSON）</el-dropdown-item>
-                <el-dropdown-item command="import" :icon="FolderOpened">导入文档 / 文件</el-dropdown-item>
+                <el-dropdown-item command="import-asset" :icon="FolderOpened">导入文档 / 文件</el-dropdown-item>
                 <el-dropdown-item command="open-data-folder" :icon="FolderOpened">打开数据文件夹</el-dropdown-item>
-                <el-dropdown-item command="note" :icon="DocumentAdd">新建笔记</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
@@ -2373,7 +2384,19 @@ onUnmounted(() => {
     </el-header>
 
     <el-main class="content-area">
-      <el-tabs v-model="workspaceTab" class="workspace-main-tabs" type="border-card">
+      <div v-if="shellMode === 'bookshelf'" class="bookshelf-host">
+        <BookshelfView
+          ref="bookshelfRef"
+          @new-note="
+            openNoteEditor({ id: null, notebookId: $event.notebookId, projectId: null, title: '' })
+          "
+          @edit-note="
+            openNoteEditor({ id: $event.id, notebookId: $event.notebookId, projectId: null, title: '' })
+          "
+          @open-node-detail="openNodeDetail($event, true)"
+        />
+      </div>
+      <el-tabs v-else v-model="workspaceTab" class="workspace-main-tabs" type="border-card">
         <el-tab-pane label="统计与洞察" name="dashboard">
           <DashboardView
             ref="dashboardRef"
@@ -2398,46 +2421,25 @@ onUnmounted(() => {
             />
           </div>
         </el-tab-pane>
-        <el-tab-pane label="知识图谱" name="graph" lazy>
-          <div class="graph-pane graph-pane-embedded">
-            <div class="graph-pane-header">
-              <span>知识图谱</span>
-              <div class="graph-actions">
-                <el-popover placement="bottom-end" width="320" trigger="click">
-                  <template #reference>
-                    <span>
-                      <el-tooltip content="图谱过滤器" placement="bottom">
-                        <el-button circle :icon="Filter" />
-                      </el-tooltip>
-                    </span>
-                  </template>
-                  <div class="popover-panel">
-                    <div class="popover-title">图谱过滤器</div>
-                    <el-select v-model="graphTypeFilters" multiple clearable placeholder="按节点类型过滤">
-                      <el-option v-for="type in availableTypes" :key="`graph-type-${type}`" :label="type" :value="type" />
-                    </el-select>
-                    <el-select v-model="graphTagFilters" multiple clearable filterable placeholder="按标签过滤">
-                      <el-option v-for="tag in allTags" :key="`graph-tag-${tag.id}`" :label="tag.name" :value="tag.name" />
-                    </el-select>
-                  </div>
-                </el-popover>
-                <el-tooltip content="保存当前布局" placement="bottom">
-                  <el-button circle :icon="Collection" :loading="savingLayout" @click="saveGraphLayout" />
-                </el-tooltip>
-                <el-tooltip content="清除高亮 / 退出聚焦" placement="bottom">
-                  <el-button circle :icon="Aim" :disabled="!activeNodeId && !isFocusMode" @click="clearFocus" />
-                </el-tooltip>
-                <el-tooltip content="返回统计" placement="bottom">
-                  <el-button circle :icon="Close" @click="workspaceTab = 'dashboard'" />
-                </el-tooltip>
-              </div>
+        <el-tab-pane label="项目笔记" name="notes">
+          <div class="project-notes-pane">
+            <div class="project-notes-toolbar">
+              <el-button type="primary" :icon="Plus" @click="createProjectNote">新建项目笔记</el-button>
+              <el-button text :icon="Refresh" @click="loadProjectNotes">刷新列表</el-button>
             </div>
-            <div class="graph-pane-body">
-              <div v-if="isFocusMode" class="focus-banner">
-                <span>当前处于局部聚焦模式：{{ focusNodeName }}</span>
-                <el-button size="small" text :icon="Close" @click="clearFocus">返回全局</el-button>
-              </div>
-              <div ref="graphContainer" class="graph-canvas graph-canvas-embedded"></div>
+            <div class="project-notes-grid">
+              <el-card
+                v-for="n in projectNotesList"
+                :key="n.id"
+                class="project-note-card"
+                shadow="hover"
+                @click="openProjectNote(n.id)"
+              >
+                <div class="pn-title">{{ n.title?.trim() || `笔记 #${n.id}` }}</div>
+                <div class="pn-meta">{{ n.created_at?.slice(0, 16) }}</div>
+                <p class="pn-snippet">{{ (n.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
+              </el-card>
+              <el-empty v-if="!projectNotesList.length" description="暂无项目笔记" />
             </div>
           </div>
         </el-tab-pane>
@@ -2528,19 +2530,14 @@ onUnmounted(() => {
             <template v-if="copilotMode === 'global'">
               <div class="global-ai-linked-block">
                 <div class="copilot-section-title">关联项目</div>
-                <div v-if="!projects.length" class="global-ai-linked-empty">暂无项目，请先创建并导入数据</div>
-                <el-checkbox-group
-                  v-else
-                  v-model="globalLinkedProjectIds"
-                  class="global-linked-project-checkboxes"
-                  @change="onGlobalLinkedProjectsChange"
-                >
-                  <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-linked-project-cb">
-                    {{ p.name }}
-                  </el-checkbox>
-                </el-checkbox-group>
+                <el-button size="small" type="primary" plain class="global-linked-open-btn" @click="openGlobalLinkedDrawer">
+                  选择关联项目…
+                </el-button>
+                <p v-if="globalLinkedProjectIds.length" class="global-linked-summary">
+                  已选 {{ globalLinkedProjectIds.length }} 个项目
+                </p>
                 <p class="global-ai-linked-hint">
-                  勾选后，全局 AI 会通过主进程统计引擎合并多项目的结构化行（Excel / CSV / JSON 导入的 excel_row，含 _DataNodeProjectId），用于跨项目对比与排行类问题。
+                  在弹出面板中勾选需合并的项目数据；确认后注入全局 AI 统计摘要。
                 </p>
                 <div class="copilot-section-title copilot-section-title--sub">全局对话历史</div>
               </div>
@@ -2684,28 +2681,66 @@ onUnmounted(() => {
     </div>
   </el-drawer>
 
-  <el-dialog v-model="noteDialogVisible" title="新建笔记" width="640px">
-    <el-input v-model="noteTitle" class="mb-3" placeholder="请输入笔记标题（可选）" />
-    <el-input
-      v-model="noteContent"
-      type="textarea"
-      :rows="8"
-      placeholder="请输入笔记正文..."
-      maxlength="10000"
-      show-word-limit
-    />
-    <el-input
-      v-model="noteTagsInput"
-      class="mt-3"
-      placeholder="标签（可选）：用逗号或空格分隔，如 项目A,待跟进,灵感"
-    />
-    <template #footer>
-      <div class="flex justify-end gap-2">
-        <el-button @click="noteDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="savingNote" @click="saveNote">保存</el-button>
-      </div>
-    </template>
+  <NoteEditorShell
+    v-model:visible="noteEditorOpen"
+    :note-id="noteEditorId"
+    :notebook-id="noteEditorNotebookId"
+    :project-id="noteEditorProjectId"
+    :initial-title="noteEditorTitleSeed"
+    @saved="onNoteEditorSaved"
+    @update:visible="(v) => !v && onNoteEditorClosed()"
+  />
+
+  <el-dialog v-model="importChoiceDialogVisible" title="导入数据到当前项目" width="440px" align-center>
+    <p class="import-choice-hint">请选择数据来源。结构化表格支持 Excel、CSV、JSON。</p>
+    <div class="import-choice-actions">
+      <el-button type="primary" @click="pickLocalFileAndImport">从本地电脑导入</el-button>
+      <el-button @click="openBookshelfImportPickerForProject">从书柜导入</el-button>
+    </div>
   </el-dialog>
+
+  <el-dialog v-model="bookshelfPickForImportVisible" title="从书柜选择文件" width="520px">
+    <el-scrollbar max-height="360px">
+      <div
+        v-for="row in bookshelfImportCandidates"
+        :key="row.id"
+        class="bookshelf-pick-row"
+        @click="confirmImportFromBookshelfItem(row)"
+      >
+        <span class="bp-name">{{ row.title?.trim() || row.source_file_path }}</span>
+        <span class="bp-path">{{ row.source_file_path }}</span>
+      </div>
+      <el-empty v-if="!bookshelfImportCandidates.length" description="没有可选项" />
+    </el-scrollbar>
+  </el-dialog>
+
+  <el-drawer
+    v-model="globalLinkedDrawerVisible"
+    direction="ltr"
+    size="320px"
+    title="关联项目"
+    append-to-body
+  >
+    <p class="global-linked-drawer-hint">勾选参与全局 AI 统计合并的项目，确认后生效。</p>
+    <el-checkbox-group v-model="globalLinkedDraftIds" class="global-linked-drawer-checks">
+      <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-linked-drawer-cb">
+        {{ p.name }}
+      </el-checkbox>
+    </el-checkbox-group>
+    <div class="global-linked-drawer-footer">
+      <el-button @click="globalLinkedDrawerVisible = false">取消</el-button>
+      <el-button
+        type="primary"
+        @click="
+          globalLinkedProjectIds = [...globalLinkedDraftIds]
+          onGlobalLinkedProjectsChange()
+          globalLinkedDrawerVisible = false
+        "
+      >
+        确认
+      </el-button>
+    </div>
+  </el-drawer>
 
   <el-dialog v-model="settingsVisible" title="全局设置" width="720px">
     <el-tabs v-loading="settingsLoading" class="settings-tabs">
@@ -3026,7 +3061,105 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.workspace-main-tabs {
+.bookshelf-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.import-choice-hint {
+  margin: 0 0 16px;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.import-choice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.bookshelf-pick-row {
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 8px;
+}
+.bookshelf-pick-row:hover {
+  background: #f1f5f9;
+}
+.bp-name {
+  display: block;
+  font-weight: 600;
+  color: #0f172a;
+}
+.bp-path {
+  font-size: 12px;
+  color: #94a3b8;
+  word-break: break-all;
+}
+.global-linked-drawer-hint {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+.global-linked-drawer-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.global-linked-drawer-cb {
+  margin-right: 0;
+}
+.global-linked-drawer-footer {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.global-linked-open-btn {
+  width: 100%;
+}
+.global-linked-summary {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+.project-notes-pane {
+  padding: 16px;
+  min-height: 360px;
+}
+.project-notes-toolbar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.project-notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.project-note-card {
+  cursor: pointer;
+  border-radius: 12px;
+}
+.pn-title {
+  font-weight: 600;
+  color: #0f172a;
+}
+.pn-meta {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 6px 0;
+}
+.pn-snippet {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.45;
+}
   flex: 1;
   display: flex;
   flex-direction: column;

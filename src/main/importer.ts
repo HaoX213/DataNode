@@ -378,3 +378,79 @@ export async function importAssetFile(filePath: string, title: string, projectId
     inserted: 1
   }
 }
+
+const BOOKSHELF_USER_DIR = 'bookshelf-files'
+
+export async function importFileIntoBookshelf(notebookId: number, filePath: string): Promise<ImportResult> {
+  const resolved = path.resolve(filePath)
+  const ext = path.extname(resolved).toLowerCase()
+  const baseTitle = path.basename(resolved, ext) || '未命名'
+
+  const shelfDir = path.join(app.getPath('userData'), BOOKSHELF_USER_DIR)
+  try {
+    await mkdir(shelfDir, { recursive: true })
+  } catch (error) {
+    return {
+      success: false,
+      message: formatReadImportError(error, `创建书柜目录失败: ${shelfDir}`),
+      inserted: 0
+    }
+  }
+
+  const storedPath = path.join(shelfDir, safeFileName(resolved))
+
+  try {
+    if (ext === '.docx') {
+      let buffer: Buffer
+      try {
+        buffer = await readFile(resolved)
+      } catch (error) {
+        return {
+          success: false,
+          message: formatReadImportError(error, `Word 读取失败: ${resolved}`),
+          inserted: 0
+        }
+      }
+      const result = await mammoth.extractRawText({ buffer })
+      const text = result.value.trim()
+      await copyFile(resolved, storedPath)
+      insertDocumentItem({
+        notebookId,
+        projectId: null,
+        sourceFilePath: storedPath,
+        contentText: text || `[Word] ${baseTitle}`
+      })
+      return { success: true, message: `已导入 Word 到书柜：${path.basename(resolved)}`, inserted: 1 }
+    }
+
+    await copyFile(resolved, storedPath)
+
+    if (ext === '.pdf' || ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext)) {
+      insertAssetItem({
+        notebookId,
+        projectId: null,
+        title: baseTitle,
+        sourceFilePath: storedPath,
+        originalFilePath: resolved,
+        extension: ext
+      })
+      return { success: true, message: `已导入文件到书柜：${path.basename(resolved)}`, inserted: 1 }
+    }
+
+    insertAssetItem({
+      notebookId,
+      projectId: null,
+      title: baseTitle,
+      sourceFilePath: storedPath,
+      originalFilePath: resolved,
+      extension: ext || '.bin'
+    })
+    return { success: true, message: `已导入文档到书柜：${path.basename(resolved)}`, inserted: 1 }
+  } catch (error) {
+    return {
+      success: false,
+      message: formatReadImportError(error, `书柜导入失败: ${resolved}`),
+      inserted: 0
+    }
+  }
+}

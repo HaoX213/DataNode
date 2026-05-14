@@ -23,6 +23,13 @@ import {
   insertNoteItem,
   insertStructuredJsonRows,
   listItems,
+  createNotebook,
+  deleteNotebook,
+  renameNotebook,
+  listBookshelfItems,
+  listBookshelfImportCandidates,
+  listProjectNotes,
+  listNotebookTree,
   listNotebooks,
   listProjects,
   getProjectUiState,
@@ -60,6 +67,7 @@ import {
   importDocxFile,
   importExcelFile,
   importJsonTableFile,
+  importFileIntoBookshelf,
   readTextFilePreview
 } from './importer'
 import { chatWithKnowledgeBase, summarizeNodeContext, type AiChatMessage } from './ai'
@@ -200,6 +208,70 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('db:notebooks:list', () => listNotebooks())
+  ipcMain.handle('bookshelf:tree:list', () => {
+    try {
+      return { success: true, data: toSerializable(listNotebookTree()) }
+    } catch (error) {
+      return { success: false, message: String(error), data: [] }
+    }
+  })
+  ipcMain.handle('bookshelf:notebook:create', (_, name: string, parentId?: number | null) => {
+    try {
+      const id = createNotebook(String(name ?? ''), parentId)
+      return { success: true, data: { id } }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:notebook:rename', (_, id: number, name: string) => {
+    try {
+      renameNotebook(Number(id), String(name ?? ''))
+      return { success: true }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:notebook:delete', (_, id: number) => {
+    try {
+      deleteNotebook(Number(id))
+      return { success: true }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('bookshelf:items:list', (_, notebookId: number) => {
+    try {
+      return { success: true, data: toSerializable(listBookshelfItems(Number(notebookId))) }
+    } catch (error) {
+      return { success: false, message: String(error), data: [] }
+    }
+  })
+  ipcMain.handle('bookshelf:import:candidates', () => {
+    try {
+      return { success: true, data: toSerializable(listBookshelfImportCandidates()) }
+    } catch (error) {
+      return { success: false, message: String(error), data: [] }
+    }
+  })
+  ipcMain.handle('bookshelf:import-file', async (_, notebookId: number, filePath: string) => {
+    try {
+      const r = await importFileIntoBookshelf(Number(notebookId), String(filePath ?? ''))
+      return { ...r }
+    } catch (error) {
+      return { success: false, message: String(error), inserted: 0 }
+    }
+  })
+  ipcMain.handle('project:notes:list', (_, projectId: number) => {
+    try {
+      return { success: true, data: toSerializable(listProjectNotes(Number(projectId))) }
+    } catch (error) {
+      return { success: false, message: String(error), data: [] }
+    }
+  })
+  ipcMain.handle('shell:open-path', (_, filePath: string) => {
+    void shell.openPath(String(filePath ?? ''))
+    return { success: true }
+  })
   ipcMain.handle('projects:list', () => {
     try {
       return { success: true, data: toSerializable(listProjects()) }
@@ -477,33 +549,57 @@ app.whenReady().then(() => {
       return { success: false, message: `获取关联失败: ${String(error)}`, data: [] }
     }
   })
-  ipcMain.handle('db:items:create-note', (_, title: string, contentText: string, tags: string[] = [], projectId?: number) => {
-    try {
-      const text = (contentText ?? '').trim()
-      const noteTitle = (title ?? '').trim()
-      if (!text) {
-        return { success: false, message: '笔记内容不能为空' }
+  ipcMain.handle(
+    'db:items:create-note',
+    (
+      _,
+      title: string,
+      contentText: string,
+      tags: string[] = [],
+      projectId?: number | null,
+      notebookId?: number
+    ) => {
+      try {
+        const text = (contentText ?? '').trim()
+        const noteTitle = (title ?? '').trim()
+        if (!text) {
+          return { success: false, message: '笔记内容不能为空' }
+        }
+        const nb =
+          notebookId != null && Number.isFinite(Number(notebookId)) && Number(notebookId) > 0
+            ? Number(notebookId)
+            : getDefaultNotebookId()
+        const pid =
+          projectId === null
+            ? null
+            : projectId !== undefined && Number.isFinite(Number(projectId)) && Number(projectId) > 0
+              ? Number(projectId)
+              : undefined
+        const noteId = insertNoteItem({
+          notebookId: nb,
+          projectId: pid,
+          title: noteTitle,
+          contentText: text,
+          tags: Array.isArray(tags) ? tags : []
+        })
+        return { success: true, message: '笔记创建成功', data: { id: noteId } }
+      } catch (error) {
+        return { success: false, message: `笔记创建失败: ${String(error)}` }
       }
-      const notebookId = getDefaultNotebookId()
-      const noteId = insertNoteItem({
-        notebookId,
-        projectId: Number(projectId),
-        title: noteTitle,
-        contentText: text,
-        tags: Array.isArray(tags) ? tags : []
-      })
-      return { success: true, message: '笔记创建成功', data: { id: noteId } }
-    } catch (error) {
-      return { success: false, message: `笔记创建失败: ${String(error)}` }
     }
-  })
+  )
   ipcMain.handle('db:items:clear', (_, projectId?: number) => {
     clearItemsForRetest(Number(projectId))
     return { success: true, message: '已清空 items 测试数据' }
   })
-  ipcMain.handle('graph:get-all-tags', (_, projectId?: number) => {
+  ipcMain.handle('graph:get-all-tags', (_, payload?: { projectId?: number; bookshelfOnly?: boolean }) => {
     try {
-      return { success: true, data: toSerializable(getAllTags(Number(projectId))) }
+      const raw = payload?.projectId
+      const projectId = Number.isFinite(raw) ? Number(raw) : undefined
+      return {
+        success: true,
+        data: toSerializable(getAllTags(projectId, Boolean(payload?.bookshelfOnly)))
+      }
     } catch (error) {
       return { success: false, message: `获取标签失败: ${String(error)}`, data: [] }
     }
@@ -540,29 +636,40 @@ app.whenReady().then(() => {
       return { success: false, message: `关系删除失败: ${String(error)}` }
     }
   })
-  ipcMain.handle('graph:get-graph-data', (_, filters?: { types?: string[]; tags?: string[]; projectId?: number }) => {
-    try {
-      // 返回前端知识图谱可视化所需的标准 nodes/edges 结构
-      return { success: true, data: toSerializable(getGraphData(filters ?? {})) }
-    } catch (error) {
-      return {
-        success: false,
-        message: `图谱数据获取失败: ${String(error)}`,
-        data: { nodes: [], edges: [] }
+  ipcMain.handle(
+    'graph:get-graph-data',
+    (_, filters?: { types?: string[]; tags?: string[]; projectId?: number; bookshelfOnly?: boolean }) => {
+      try {
+        return { success: true, data: toSerializable(getGraphData(filters ?? {})) }
+      } catch (error) {
+        return {
+          success: false,
+          message: `图谱数据获取失败: ${String(error)}`,
+          data: { nodes: [], edges: [] }
+        }
       }
     }
-  })
-  ipcMain.handle('graph:get-local-graph-data', (_, nodeId: number, depth = 1, projectId?: number) => {
-    try {
-      return { success: true, data: toSerializable(getLocalGraphData(Number(nodeId), Number(depth), Number(projectId))) }
-    } catch (error) {
-      return {
-        success: false,
-        message: `局部图谱获取失败: ${String(error)}`,
-        data: { nodes: [], edges: [] }
+  )
+  ipcMain.handle(
+    'graph:get-local-graph-data',
+    (_, nodeId: number, depth = 1, projectId?: number, bookshelfOnly?: boolean) => {
+      try {
+        const pid = Number.isFinite(projectId) ? Number(projectId) : undefined
+        return {
+          success: true,
+          data: toSerializable(
+            getLocalGraphData(Number(nodeId), Number(depth), pid, Boolean(bookshelfOnly))
+          )
+        }
+      } catch (error) {
+        return {
+          success: false,
+          message: `局部图谱获取失败: ${String(error)}`,
+          data: { nodes: [], edges: [] }
+        }
       }
     }
-  })
+  )
   ipcMain.handle('graph:update-node-positions', (_, positions: Array<{ id: number; x: number; y: number }>) => {
     try {
       const updated = updateNodePositions(Array.isArray(positions) ? positions : [])

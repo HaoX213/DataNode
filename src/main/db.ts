@@ -93,6 +93,17 @@ function ensureItemPositionColumns(database: Database.Database): void {
   }
 }
 
+function ensureNotebookHierarchyColumns(database: Database.Database): void {
+  const columns = database.prepare('PRAGMA table_info(notebooks)').all() as Array<{ name: string }>
+  const columnNames = new Set(columns.map((column) => column.name))
+  if (!columnNames.has('parent_id')) {
+    database.exec('ALTER TABLE notebooks ADD COLUMN parent_id INTEGER;')
+  }
+  if (!columnNames.has('sort_order')) {
+    database.exec('ALTER TABLE notebooks ADD COLUMN sort_order INTEGER DEFAULT 0;')
+  }
+}
+
 function ensureProjectUiAndAiTables(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS project_ui_state (
@@ -683,6 +694,7 @@ export function initDatabase(): void {
   `)
 
   const defaultProjectId = ensureProjects(database)
+  ensureNotebookHierarchyColumns(database)
   ensureItemsProjectColumn(database, defaultProjectId)
   ensureItemsSupportsAssetNodes(database)
   ensureItemPositionColumns(database)
@@ -708,6 +720,7 @@ export function initDatabase(): void {
 export type NotebookRow = {
   id: number
   name: string
+  parent_id: number | null
   created_at: string
 }
 
@@ -753,13 +766,101 @@ export function deleteProject(projectId: number): void {
 }
 
 export function listNotebooks(): NotebookRow[] {
+  return listNotebookTree()
+}
+
+export function listNotebookTree(): NotebookRow[] {
   const database = getDb()
-  const stmt = database.prepare(`
-    SELECT id, name, created_at
-    FROM notebooks
-    ORDER BY id DESC
-  `)
-  return stmt.all() as NotebookRow[]
+  return database
+    .prepare(
+      `
+      SELECT id, name, parent_id, created_at
+      FROM notebooks
+      ORDER BY (parent_id IS NULL) DESC, sort_order ASC, id ASC
+    `
+    )
+    .all() as NotebookRow[]
+}
+
+export function createNotebook(name: string, parentId?: number | null): number {
+  const database = getDb()
+  const n = name.trim() || '新建文件夹'
+  const pid =
+    parentId != null && Number.isFinite(Number(parentId)) && Number(parentId) > 0 ? Number(parentId) : null
+  const result = database.prepare('INSERT INTO notebooks (name, parent_id, description) VALUES (?, ?, ?)').run(n, pid, '')
+  return Number(result.lastInsertRowid)
+}
+
+export function renameNotebook(notebookId: number, name: string): void {
+  getDb()
+    .prepare(`UPDATE notebooks SET name = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(name.trim() || '未命名文件夹', notebookId)
+}
+
+export function deleteNotebook(notebookId: number): void {
+  const database = getDb()
+  const children = database.prepare('SELECT COUNT(*) AS c FROM notebooks WHERE parent_id = ?').get(notebookId) as {
+    c: number
+  }
+  if (Number(children.c) > 0) {
+    throw new Error('请先删除或移动子文件夹')
+  }
+  database.prepare('DELETE FROM items WHERE notebook_id = ? AND project_id IS NULL').run(notebookId)
+  database.prepare('DELETE FROM notebooks WHERE id = ?').run(notebookId)
+}
+
+export function listBookshelfItems(notebookId: number): ItemRow[] {
+  const database = getDb()
+  return database
+    .prepare(
+      `
+      SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+      FROM items
+      WHERE notebook_id = @notebookId AND project_id IS NULL
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT 1000
+    `
+    )
+    .all({ notebookId }) as ItemRow[]
+}
+
+export function listBookshelfImportCandidates(): ItemRow[] {
+  const database = getDb()
+  return database
+    .prepare(
+      `
+      SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+      FROM items
+      WHERE project_id IS NULL
+        AND type IN ('file', 'document')
+        AND (
+          lower(source_file_path) LIKE '%.xlsx'
+          OR lower(source_file_path) LIKE '%.xls'
+          OR lower(source_file_path) LIKE '%.csv'
+          OR lower(source_file_path) LIKE '%.json'
+        )
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT 200
+    `
+    )
+    .all() as ItemRow[]
+}
+
+export function listProjectNotes(projectId: number): ItemRow[] {
+  const database = getDb()
+  const pid = Number(projectId)
+  if (!Number.isFinite(pid) || pid <= 0) return []
+  return database
+    .prepare(
+      `
+      SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+      FROM items
+      WHERE project_id = @pid AND type = 'note'
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT 500
+    `
+    )
+    .all({ pid }) as ItemRow[]
 }
 
 export type ItemRow = {
@@ -902,33 +1003,41 @@ export function insertStructuredJsonRows(args: {
   return insertExcelRows(payload)
 }
 
+function resolveProjectIdForInsert(projectId?: number | null): number | null {
+  if (projectId === null) return null
+  if (projectId !== undefined && Number.isFinite(Number(projectId)) && Number(projectId) > 0) {
+    return Number(projectId)
+  }
+  return getDefaultProjectId()
+}
+
 export function insertDocumentItem(args: {
   notebookId: number
-  projectId: number
+  projectId?: number | null
   sourceFilePath: string
   contentText: string
 }): number {
   const database = getDb()
-  const projectId = Number.isFinite(args.projectId) ? args.projectId : getDefaultProjectId()
+  const projectId = resolveProjectIdForInsert(args.projectId)
   const result = database
     .prepare(`
       INSERT INTO items (notebook_id, project_id, type, title, source_file_path, content_text, content_json)
       VALUES (@notebookId, @projectId, 'document', '', @sourceFilePath, @contentText, '')
     `)
-    .run({ ...args, projectId })
+    .run({ notebookId: args.notebookId, projectId, sourceFilePath: args.sourceFilePath, contentText: args.contentText })
   return Number(result.lastInsertRowid)
 }
 
 export function insertAssetItem(args: {
   notebookId: number
-  projectId: number
+  projectId?: number | null
   title: string
   sourceFilePath: string
   originalFilePath: string
   extension: string
 }): number {
   const database = getDb()
-  const projectId = Number.isFinite(args.projectId) ? args.projectId : getDefaultProjectId()
+  const projectId = resolveProjectIdForInsert(args.projectId)
   const title = args.title.trim()
   const result = database
     .prepare(`
@@ -981,13 +1090,14 @@ export function searchItems(keyword: string, projectId?: number): ItemRow[] {
 
 export function insertNoteItem(args: {
   notebookId: number
-  projectId: number
+  /** null：书柜全局笔记；省略或 undefined：写入默认项目 */
+  projectId?: number | null
   title: string
   contentText: string
   tags: string[]
 }): number {
   const database = getDb()
-  const projectId = Number.isFinite(args.projectId) ? args.projectId : getDefaultProjectId()
+  const projectId = resolveProjectIdForInsert(args.projectId)
   const text = args.contentText.trim()
   const title = args.title.trim()
   const normalizedTags = Array.from(
@@ -1059,8 +1169,28 @@ export type TagRow = {
   color: string
 }
 
-export function getAllTags(projectId?: number): TagRow[] {
+export function getAllTags(projectId?: number, bookshelfOnly?: boolean): TagRow[] {
   const database = getDb()
+  if (bookshelfOnly) {
+    const rows = database
+      .prepare(
+        `
+      SELECT DISTINCT t.id, t.name, t.color
+      FROM tags t
+      INNER JOIN node_tags nt ON nt.tag_id = t.id
+      INNER JOIN items i ON i.id = nt.node_id
+      WHERE i.project_id IS NULL
+      ORDER BY t.name ASC
+    `
+      )
+      .all() as TagRow[]
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      color: row.color
+    }))
+  }
+
   const rows = database
     .prepare(
       `
@@ -1507,6 +1637,8 @@ export type GraphFilterInput = {
   types?: string[]
   tags?: string[]
   projectId?: number
+  /** 仅书柜：project_id IS NULL 的节点与边 */
+  bookshelfOnly?: boolean
 }
 
 export type NodePositionInput = {
@@ -1549,6 +1681,7 @@ function filterGraphData(graph: GraphData, filters: GraphFilterInput = {}): Grap
 export function getGraphData(filters: GraphFilterInput = {}): GraphData {
   const database = getDb()
   const projectId = Number.isFinite(filters.projectId) ? filters.projectId : null
+  const bookshelfOnly = Boolean(filters.bookshelfOnly)
 
   const nodeRows = database.prepare(`
     SELECT
@@ -1564,9 +1697,14 @@ export function getGraphData(filters: GraphFilterInput = {}): GraphData {
     FROM items i
     LEFT JOIN node_tags nt ON nt.node_id = i.id
     LEFT JOIN tags t ON t.id = nt.tag_id
-    WHERE (@projectId IS NULL OR i.project_id = @projectId)
+    WHERE
+      (@bookshelfOnly = 1 AND i.project_id IS NULL)
+      OR (@bookshelfOnly = 0 AND (@projectId IS NULL OR i.project_id = @projectId))
     ORDER BY i.id ASC
-  `).all({ projectId }) as Array<{
+  `).all({
+    projectId,
+    bookshelfOnly: bookshelfOnly ? 1 : 0
+  }) as Array<{
     node_id: number
     node_type: ItemRow['type']
     node_title: string
@@ -1605,9 +1743,11 @@ export function getGraphData(filters: GraphFilterInput = {}): GraphData {
     FROM node_relations r
     INNER JOIN items source ON source.id = r.source_id
     INNER JOIN items target ON target.id = r.target_id
-    WHERE (@projectId IS NULL OR (source.project_id = @projectId AND target.project_id = @projectId))
+    WHERE
+      (@bookshelfOnly = 1 AND source.project_id IS NULL AND target.project_id IS NULL)
+      OR (@bookshelfOnly = 0 AND (@projectId IS NULL OR (source.project_id = @projectId AND target.project_id = @projectId)))
     ORDER BY r.id ASC
-  `).all({ projectId }) as GraphEdge[]
+  `).all({ projectId, bookshelfOnly: bookshelfOnly ? 1 : 0 }) as GraphEdge[]
   const edges = edgeRows.map((edge) => ({
     id: edge.id,
     source: edge.source,
@@ -1621,8 +1761,8 @@ export function getGraphData(filters: GraphFilterInput = {}): GraphData {
   }, filters)
 }
 
-export function getLocalGraphData(nodeId: number, depth = 1, projectId?: number): GraphData {
-  const graph = getGraphData({ projectId })
+export function getLocalGraphData(nodeId: number, depth = 1, projectId?: number, bookshelfOnly?: boolean): GraphData {
+  const graph = getGraphData({ projectId, bookshelfOnly: Boolean(bookshelfOnly) })
   const maxDepth = Math.max(1, Math.min(Number.isFinite(depth) ? Math.floor(depth) : 1, 4))
   const adjacency = new Map<number, number[]>()
   for (const edge of graph.edges) {

@@ -4,6 +4,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 export type NotebookRow = {
   id: number
   name: string
+  parent_id: number | null
   created_at: string
 }
 
@@ -131,6 +132,7 @@ export type GraphFilterInput = {
   types?: string[]
   tags?: string[]
   projectId?: number
+  bookshelfOnly?: boolean
 }
 
 export type NodePositionInput = {
@@ -308,6 +310,24 @@ export type DataPaths = {
 
 const api = {
   listNotebooks: (): Promise<NotebookRow[]> => ipcRenderer.invoke('db:notebooks:list'),
+  listBookshelfTree: (): Promise<{ success: boolean; message?: string; data: NotebookRow[] }> =>
+    ipcRenderer.invoke('bookshelf:tree:list'),
+  createBookshelfFolder: (name: string, parentId?: number | null): Promise<ActionResult & { data?: { id: number } }> =>
+    ipcRenderer.invoke('bookshelf:notebook:create', name, parentId),
+  renameBookshelfFolder: (id: number, name: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('bookshelf:notebook:rename', id, name),
+  deleteBookshelfFolder: (id: number): Promise<ActionResult> =>
+    ipcRenderer.invoke('bookshelf:notebook:delete', id),
+  listBookshelfItems: (notebookId: number): Promise<{ success: boolean; data: ItemRow[] }> =>
+    ipcRenderer.invoke('bookshelf:items:list', notebookId),
+  listBookshelfImportCandidates: (): Promise<{ success: boolean; data: ItemRow[] }> =>
+    ipcRenderer.invoke('bookshelf:import:candidates'),
+  importFileIntoBookshelf: (notebookId: number, filePath: string): Promise<ImportResult> =>
+    ipcRenderer.invoke('bookshelf:import-file', notebookId, filePath),
+  listProjectNotes: (projectId: number): Promise<{ success: boolean; data: ItemRow[] }> =>
+    ipcRenderer.invoke('project:notes:list', projectId),
+  openPathWithShell: (filePath: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('shell:open-path', filePath),
   listProjects: (): Promise<ProjectsResult> => ipcRenderer.invoke('projects:list'),
   createProject: (name: string): Promise<ProjectResult> => ipcRenderer.invoke('projects:create', name),
   deleteProject: (projectId: number): Promise<ActionResult> => ipcRenderer.invoke('projects:delete', projectId),
@@ -332,8 +352,14 @@ const api = {
     tags: string[]
   }): Promise<ActionResult> => ipcRenderer.invoke('db:items:update-detail', payload),
   openFile: (filePath: string): Promise<ActionResult> => ipcRenderer.invoke('db:items:open-file', filePath),
-  createNote: (title: string, contentText: string, tags: string[], projectId?: number): Promise<ActionResult> =>
-    ipcRenderer.invoke('db:items:create-note', title, contentText, tags, projectId),
+  createNote: (
+    title: string,
+    contentText: string,
+    tags: string[],
+    projectId?: number | null,
+    notebookId?: number
+  ): Promise<ActionResult> =>
+    ipcRenderer.invoke('db:items:create-note', title, contentText, tags, projectId, notebookId),
   clearItems: (projectId?: number): Promise<ActionResult> => ipcRenderer.invoke('db:items:clear', projectId),
   pickImportFile: (): Promise<PickImportFileResult> => ipcRenderer.invoke('db:items:pick-import-file'),
   importFile: (filePath: string, title?: string, projectId?: number): Promise<ImportResult> =>
@@ -344,11 +370,17 @@ const api = {
     sourceFilePath?: string
   }): Promise<ImportResult> => ipcRenderer.invoke('db:items:import-json-array', payload),
   statsQuery: (payload: StatsQueryPayload): Promise<StatsQueryResult> => ipcRenderer.invoke('stats:query', payload),
-  getAllTags: (projectId?: number): Promise<TagsResult> => ipcRenderer.invoke('graph:get-all-tags', projectId),
+  getAllTags: (payload?: { projectId?: number; bookshelfOnly?: boolean }): Promise<TagsResult> =>
+    ipcRenderer.invoke('graph:get-all-tags', payload ?? {}),
   getGraphData: (filters?: GraphFilterInput): Promise<GraphDataResult> =>
     ipcRenderer.invoke('graph:get-graph-data', filters),
-  getLocalGraphData: (nodeId: number, depth?: number, projectId?: number): Promise<GraphDataResult> =>
-    ipcRenderer.invoke('graph:get-local-graph-data', nodeId, depth, projectId),
+  getLocalGraphData: (
+    nodeId: number,
+    depth?: number,
+    projectId?: number,
+    bookshelfOnly?: boolean
+  ): Promise<GraphDataResult> =>
+    ipcRenderer.invoke('graph:get-local-graph-data', nodeId, depth, projectId, bookshelfOnly),
   getNodeEdges: (nodeId: number): Promise<NodeEdgesResult> => ipcRenderer.invoke('graph:get-node-edges', nodeId),
   addTagToNode: (nodeId: number, tagName: string, color: string): Promise<ActionResult> =>
     ipcRenderer.invoke('graph:add-tag-to-node', nodeId, tagName, color),
