@@ -197,6 +197,8 @@ export type ProjectUiStateV1 = {
   workspace: {
     tableFilter: string
     searchKeyword: string
+    /** 项目工作区上次打开的标签页 */
+    workspaceTab?: 'dashboard' | 'raw' | 'notes'
   }
   aiCurrentTopicId: number | null
   chartConfigurations?: ChartCardConfig[]
@@ -274,7 +276,7 @@ function defaultDashboardUi(): DashboardUiPersistV1 {
 function defaultProjectUiState(): ProjectUiStateV1 {
   return {
     dashboard: defaultDashboardUi(),
-    workspace: { tableFilter: 'all', searchKeyword: '' },
+    workspace: { tableFilter: 'all', searchKeyword: '', workspaceTab: 'dashboard' },
     aiCurrentTopicId: null
   }
 }
@@ -1347,6 +1349,34 @@ export function updateNodeDetail(args: {
   })
 
   tx()
+}
+
+/** 书柜/笔记卡片封面，存于 content_json.dnCover（data URL 或 preset:xxx） */
+export function patchItemCoverImage(itemId: number, cover: string | null): void {
+  const database = getDb()
+  const row = database.prepare('SELECT id, type, content_json, title FROM items WHERE id = ?').get(itemId) as
+    | { id: number; type: string; content_json: string; title: string }
+    | undefined
+  if (!row) throw new Error(`条目不存在: ${itemId}`)
+  if (row.type !== 'note') throw new Error('仅笔记支持封面')
+  let parsed: Record<string, unknown> = {}
+  try {
+    parsed = row.content_json?.trim() ? (JSON.parse(row.content_json) as Record<string, unknown>) : {}
+  } catch {
+    parsed = { title: row.title || '未命名笔记' }
+  }
+  const c = cover?.trim() ?? ''
+  if (!c) {
+    delete parsed.dnCover
+  } else {
+    parsed.dnCover = c
+  }
+  if (parsed.title === undefined || parsed.title === null || String(parsed.title) === '') {
+    parsed.title = row.title || '未命名笔记'
+  }
+  database
+    .prepare(`UPDATE items SET content_json = @content_json, updated_at = datetime('now') WHERE id = @id`)
+    .run({ id: itemId, content_json: JSON.stringify(parsed) })
 }
 
 export type RelationRow = {

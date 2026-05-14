@@ -7,7 +7,7 @@ import RawDataView from './components/RawDataView.vue'
 import BookshelfView from './components/BookshelfView.vue'
 import NoteEditorShell from './components/NoteEditorShell.vue'
 import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
-import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, MagicStick, MoreFilled, Plus, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
+import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, Link, MagicStick, MoreFilled, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
 
 type ItemRow = {
   id: number
@@ -152,7 +152,7 @@ const activeAiTopicId = ref<number | null>(null)
 const activeGlobalAiTopicId = ref<number | null>(null)
 const globalLinkedProjectIds = ref<number[]>([])
 const globalLinkedDraftIds = ref<number[]>([])
-const globalLinkedDrawerVisible = ref(false)
+const globalLinkedFlyoutOpen = ref(false)
 const projectNotesList = ref<ItemRow[]>([])
 const importChoiceDialogVisible = ref(false)
 const bookshelfPickForImportVisible = ref(false)
@@ -192,6 +192,7 @@ const noteEditorId = ref<number | null>(null)
 const noteEditorNotebookId = ref(0)
 const noteEditorProjectId = ref<number | null>(null)
 const noteEditorTitleSeed = ref('')
+const noteEditorVariant = ref<'split' | 'fullscreen'>('fullscreen')
 const showMetadata = ref(false)
 const graphContainer = ref<HTMLDivElement | null>(null)
 const chatMessagesContainer = ref<HTMLDivElement | null>(null)
@@ -421,9 +422,15 @@ const copilotModeBadge = computed(() => {
   return `项目 AI · ${currentProject.value?.name ?? '—'}`
 })
 
-function openGlobalLinkedDrawer(): void {
+function openGlobalLinkedFlyout(): void {
   globalLinkedDraftIds.value = [...globalLinkedProjectIds.value]
-  globalLinkedDrawerVisible.value = true
+  globalLinkedFlyoutOpen.value = true
+}
+
+function confirmGlobalLinkedProjects(): void {
+  globalLinkedProjectIds.value = [...globalLinkedDraftIds.value]
+  onGlobalLinkedProjectsChange()
+  globalLinkedFlyoutOpen.value = false
 }
 
 async function loadGlobalLinkedProjectsFromDb(): Promise<void> {
@@ -494,6 +501,8 @@ async function loadProjectUiFromDb(projectId: number): Promise<void> {
     savedDashboardState.value = { ...emptyDashboard(), ...d.dashboard }
     currentTableFilter.value = d.workspace?.tableFilter?.trim() ? d.workspace.tableFilter : 'all'
     searchKeyword.value = d.workspace?.searchKeyword ?? ''
+    const tab = d.workspace?.workspaceTab
+    workspaceTab.value = tab === 'raw' || tab === 'notes' || tab === 'dashboard' ? tab : 'dashboard'
     activeAiTopicId.value =
       typeof d.aiCurrentTopicId === 'number' && Number.isFinite(d.aiCurrentTopicId) ? d.aiCurrentTopicId : null
     chartConfigurationsState.value = d.chartConfigurations
@@ -501,6 +510,7 @@ async function loadProjectUiFromDb(projectId: number): Promise<void> {
     savedDashboardState.value = emptyDashboard()
     currentTableFilter.value = 'all'
     searchKeyword.value = ''
+    workspaceTab.value = 'dashboard'
     activeAiTopicId.value = null
     chartConfigurationsState.value = undefined
   }
@@ -517,7 +527,8 @@ async function persistCurrentProjectUiState(projectId: number): Promise<void> {
     dashboard: { ...emptyDashboard(), ...dash },
     workspace: {
       tableFilter: currentTableFilter.value,
-      searchKeyword: searchKeyword.value
+      searchKeyword: searchKeyword.value,
+      workspaceTab: workspaceTab.value
     },
     aiCurrentTopicId: activeAiTopicId.value,
     chartConfigurations: charts
@@ -829,19 +840,24 @@ const loadProjects = async (): Promise<void> => {
 }
 
 const switchProject = async (projectId: number): Promise<void> => {
-  if (currentProjectId.value === projectId) return
+  const sameProject = currentProjectId.value === projectId
+  if (sameProject && shellMode.value === 'project') return
+
   const prev = currentProjectId.value
-  if (prev !== null) {
+  if (prev !== null && !sameProject) {
     await persistCurrentProjectUiState(prev)
   }
-  await loadProjectUiFromDb(projectId)
-  currentProjectId.value = projectId
+
+  if (!sameProject) {
+    await loadProjectUiFromDb(projectId)
+    currentProjectId.value = projectId
+  }
+
   shellMode.value = 'project'
   currentNode.value = null
   selectedContextNode.value = null
   detailDrawerVisible.value = false
   isFocusMode.value = false
-  workspaceTab.value = 'dashboard'
   await runSearch()
   await loadProjectNotes()
   coerceTableFilterForAvailableTypes()
@@ -944,6 +960,9 @@ function openNoteEditor(payload: {
   noteEditorNotebookId.value = payload.notebookId
   noteEditorProjectId.value = payload.projectId
   noteEditorTitleSeed.value = payload.title ?? ''
+  const useSplit =
+    shellMode.value === 'bookshelf' || (shellMode.value === 'project' && workspaceTab.value === 'notes')
+  noteEditorVariant.value = useSplit ? 'split' : 'fullscreen'
   noteEditorOpen.value = true
 }
 
@@ -958,6 +977,12 @@ async function onNoteEditorSaved(payload: { id: number; isNew: boolean }): Promi
 
 function onNoteEditorClosed(): void {
   noteEditorOpen.value = false
+}
+
+function onNoteEditorExitFullscreen(): void {
+  const canSplit =
+    shellMode.value === 'bookshelf' || (shellMode.value === 'project' && workspaceTab.value === 'notes')
+  noteEditorVariant.value = canSplit ? 'split' : 'fullscreen'
 }
 
 async function createProjectNote(): Promise<void> {
@@ -1985,6 +2010,7 @@ function openProjectCopilot(): void {
 function openGlobalCopilot(): void {
   copilotMode.value = 'global'
   copilotTopicsCollapsed.value = false
+  globalLinkedFlyoutOpen.value = false
   copilotVisible.value = true
 }
 
@@ -1992,6 +2018,7 @@ watch(copilotVisible, async (v) => {
   if (!v) {
     disposeCopilotCharts()
     pendingAiImport.value = null
+    globalLinkedFlyoutOpen.value = false
     if (currentProjectId.value != null) {
       await persistCurrentProjectUiState(currentProjectId.value)
     }
@@ -2190,6 +2217,7 @@ watch(workspaceTab, async (tab) => {
     await nextTick()
     dashboardRef.value?.resizeChart()
   }
+  schedulePersistProjectUi()
 })
 
 watch(filteredGraphData, () => {
@@ -2265,6 +2293,15 @@ onUnmounted(() => {
       </div>
 
       <el-button
+        class="bookshelf-sidebar-btn"
+        :class="{ 'is-collapsed': sidebarCollapsed }"
+        :icon="Reading"
+        @click="openBookshelfShell"
+      >
+        <span v-if="!sidebarCollapsed">书柜</span>
+      </el-button>
+
+      <el-button
         class="new-project-button"
         :class="{ 'is-collapsed': sidebarCollapsed }"
         :icon="Plus"
@@ -2312,7 +2349,6 @@ onUnmounted(() => {
         </div>
 
         <div class="desktop-menu">
-          <el-button text class="menu-button" type="primary" @click="openBookshelfShell">书柜</el-button>
           <el-dropdown trigger="click" @command="handleFileCommand">
             <el-button text class="menu-button">文件</el-button>
             <template #dropdown>
@@ -2387,6 +2423,8 @@ onUnmounted(() => {
       <div v-if="shellMode === 'bookshelf'" class="bookshelf-host">
         <BookshelfView
           ref="bookshelfRef"
+          class="bookshelf-pane"
+          :class="{ 'bookshelf-pane--with-editor': noteEditorOpen && noteEditorVariant === 'split' }"
           @new-note="
             openNoteEditor({ id: null, notebookId: $event.notebookId, projectId: null, title: '' })
           "
@@ -2444,6 +2482,26 @@ onUnmounted(() => {
           </div>
         </el-tab-pane>
       </el-tabs>
+
+      <div
+        v-if="noteEditorOpen"
+        class="note-editor-host"
+        :class="{ 'note-editor-host--docked': noteEditorVariant === 'split' }"
+      >
+        <NoteEditorShell
+          v-model:visible="noteEditorOpen"
+          :note-id="noteEditorId"
+          :notebook-id="noteEditorNotebookId"
+          :project-id="noteEditorProjectId"
+          :initial-title="noteEditorTitleSeed"
+          :variant="noteEditorVariant"
+          :allow-exit-to-split="shellMode === 'bookshelf' || workspaceTab === 'notes'"
+          @saved="onNoteEditorSaved"
+          @update:visible="(v) => !v && onNoteEditorClosed()"
+          @request-fullscreen="noteEditorVariant = 'fullscreen'"
+          @exit-fullscreen="onNoteEditorExitFullscreen"
+        />
+      </div>
     </el-main>
     </el-container>
   </el-container>
@@ -2528,18 +2586,20 @@ onUnmounted(() => {
         <div class="copilot-sheet-body">
           <aside v-if="!copilotTopicsCollapsed" class="copilot-topic-rail">
             <template v-if="copilotMode === 'global'">
-              <div class="global-ai-linked-block">
-                <div class="copilot-section-title">关联项目</div>
-                <el-button size="small" type="primary" plain class="global-linked-open-btn" @click="openGlobalLinkedDrawer">
-                  选择关联项目…
-                </el-button>
-                <p v-if="globalLinkedProjectIds.length" class="global-linked-summary">
+              <div class="global-ai-rail-tools">
+                <el-tooltip content="关联项目（侧栏勾选）" placement="right">
+                  <el-button
+                    class="global-link-circle-btn"
+                    circle
+                    type="primary"
+                    plain
+                    :icon="Link"
+                    @click="openGlobalLinkedFlyout"
+                  />
+                </el-tooltip>
+                <span v-if="globalLinkedProjectIds.length" class="global-linked-pill">
                   已选 {{ globalLinkedProjectIds.length }} 个项目
-                </p>
-                <p class="global-ai-linked-hint">
-                  在弹出面板中勾选需合并的项目数据；确认后注入全局 AI 统计摘要。
-                </p>
-                <div class="copilot-section-title copilot-section-title--sub">全局对话历史</div>
+                </span>
               </div>
             </template>
             <div class="copilot-topic-head-row">
@@ -2586,6 +2646,24 @@ onUnmounted(() => {
               <el-button circle :icon="Expand" @click="copilotTopicsCollapsed = false" />
             </el-tooltip>
           </div>
+          <aside v-if="copilotMode === 'global' && globalLinkedFlyoutOpen" class="global-linked-flyout">
+            <div class="global-linked-flyout-header">
+              <span class="global-linked-flyout-title">关联项目</span>
+              <el-button text circle size="small" :icon="Close" @click="globalLinkedFlyoutOpen = false" />
+            </div>
+            <p class="global-linked-flyout-hint">勾选需参与统计合并的项目，确认后生效。本面板贴近对话区左侧，不遮挡分支列表。</p>
+            <el-scrollbar class="global-linked-flyout-scroll" max-height="320px">
+              <el-checkbox-group v-model="globalLinkedDraftIds" class="global-linked-flyout-checks">
+                <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-linked-flyout-cb">
+                  {{ p.name }}
+                </el-checkbox>
+              </el-checkbox-group>
+            </el-scrollbar>
+            <div class="global-linked-flyout-footer">
+              <el-button size="small" round @click="globalLinkedFlyoutOpen = false">取消</el-button>
+              <el-button size="small" round type="primary" @click="confirmGlobalLinkedProjects">确认</el-button>
+            </div>
+          </aside>
           <div class="copilot-chat-col">
             <div ref="chatMessagesContainer" class="copilot-messages copilot-messages-embed">
               <div
@@ -2681,17 +2759,7 @@ onUnmounted(() => {
     </div>
   </el-drawer>
 
-  <NoteEditorShell
-    v-model:visible="noteEditorOpen"
-    :note-id="noteEditorId"
-    :notebook-id="noteEditorNotebookId"
-    :project-id="noteEditorProjectId"
-    :initial-title="noteEditorTitleSeed"
-    @saved="onNoteEditorSaved"
-    @update:visible="(v) => !v && onNoteEditorClosed()"
-  />
-
-  <el-dialog v-model="importChoiceDialogVisible" title="导入数据到当前项目" width="440px" align-center>
+ title="导入数据到当前项目" width="440px" align-center>
     <p class="import-choice-hint">请选择数据来源。结构化表格支持 Excel、CSV、JSON。</p>
     <div class="import-choice-actions">
       <el-button type="primary" @click="pickLocalFileAndImport">从本地电脑导入</el-button>
@@ -2713,34 +2781,6 @@ onUnmounted(() => {
       <el-empty v-if="!bookshelfImportCandidates.length" description="没有可选项" />
     </el-scrollbar>
   </el-dialog>
-
-  <el-drawer
-    v-model="globalLinkedDrawerVisible"
-    direction="ltr"
-    size="320px"
-    title="关联项目"
-    append-to-body
-  >
-    <p class="global-linked-drawer-hint">勾选参与全局 AI 统计合并的项目，确认后生效。</p>
-    <el-checkbox-group v-model="globalLinkedDraftIds" class="global-linked-drawer-checks">
-      <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-linked-drawer-cb">
-        {{ p.name }}
-      </el-checkbox>
-    </el-checkbox-group>
-    <div class="global-linked-drawer-footer">
-      <el-button @click="globalLinkedDrawerVisible = false">取消</el-button>
-      <el-button
-        type="primary"
-        @click="
-          globalLinkedProjectIds = [...globalLinkedDraftIds]
-          onGlobalLinkedProjectsChange()
-          globalLinkedDrawerVisible = false
-        "
-      >
-        确认
-      </el-button>
-    </div>
-  </el-drawer>
 
   <el-dialog v-model="settingsVisible" title="全局设置" width="720px">
     <el-tabs v-loading="settingsLoading" class="settings-tabs">
@@ -3068,6 +3108,44 @@ onUnmounted(() => {
   flex-direction: column;
 }
 
+.bookshelf-sidebar-btn {
+  margin: 0 12px 8px;
+  justify-content: flex-start;
+  width: calc(100% - 24px);
+  border-radius: 10px;
+  border: 1px dashed #a5b4fc;
+  color: #4338ca;
+  font-weight: 600;
+  background: #eef2ff;
+}
+.bookshelf-sidebar-btn:hover {
+  border-color: #6366f1;
+  color: #312e81;
+}
+.bookshelf-sidebar-btn.is-collapsed {
+  width: 40px;
+  margin: 0 auto 8px;
+  padding: 8px;
+}
+
+.bookshelf-pane--with-editor {
+  flex: 1;
+  min-width: 0;
+}
+
+.note-editor-host {
+  flex-shrink: 0;
+}
+.note-editor-host--docked {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(480px, 44vw);
+  z-index: 50;
+  min-width: 320px;
+}
+
 .import-choice-hint {
   margin: 0 0 16px;
   color: #64748b;
@@ -3099,33 +3177,76 @@ onUnmounted(() => {
   color: #94a3b8;
   word-break: break-all;
 }
-.global-linked-drawer-hint {
-  font-size: 13px;
-  color: #64748b;
-  margin: 0 0 12px;
-  line-height: 1.45;
+.global-ai-rail-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef2f7;
 }
-.global-linked-drawer-checks {
+.global-link-circle-btn {
+  flex-shrink: 0;
+}
+.global-linked-pill {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.global-linked-flyout {
+  width: 272px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 20px;
+  min-height: 0;
+  background: linear-gradient(180deg, #fafbff 0%, #f4f6fb 100%);
+  border-right: 1px solid #e5e7eb;
+  border-radius: 0 18px 18px 0;
+  box-shadow: 4px 0 24px rgba(15, 23, 42, 0.06);
+  padding: 12px 12px 10px;
 }
-.global-linked-drawer-cb {
-  margin-right: 0;
-}
-.global-linked-drawer-footer {
+.global-linked-flyout-header {
   display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
 }
-.global-linked-open-btn {
-  width: 100%;
+.global-linked-flyout-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  letter-spacing: 0.01em;
 }
-.global-linked-summary {
-  margin: 6px 0 0;
+.global-linked-flyout-hint {
   font-size: 12px;
   color: #64748b;
+  line-height: 1.45;
+  margin: 0 0 10px;
+}
+.global-linked-flyout-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.global-linked-flyout-cb {
+  margin-right: 0;
+  border-radius: 10px;
+  padding: 4px 6px;
+  width: 100%;
+}
+.global-linked-flyout-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e5e7eb;
+}
+.global-linked-flyout-scroll {
+  margin-bottom: 4px;
 }
 .project-notes-pane {
   padding: 16px;
@@ -3160,6 +3281,8 @@ onUnmounted(() => {
   color: #64748b;
   line-height: 1.45;
 }
+
+.workspace-main-tabs {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -3442,56 +3565,6 @@ onUnmounted(() => {
   position: relative;
 }
 
-.global-ai-linked-block {
-  padding: 10px 12px 4px;
-  border-bottom: 1px solid #eef2f7;
-  background: #fafafa;
-}
-
-.copilot-section-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 8px;
-}
-
-.copilot-section-title--sub {
-  margin-top: 10px;
-  margin-bottom: 0;
-}
-
-.global-ai-linked-empty {
-  font-size: 12px;
-  color: #94a3b8;
-  margin-bottom: 8px;
-}
-
-.global-linked-project-checkboxes {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 200px;
-  overflow: auto;
-  padding: 4px 2px;
-}
-
-.global-linked-project-cb {
-  margin-right: 0;
-  height: auto;
-  align-items: flex-start;
-  line-height: 1.35;
-}
-
-.global-ai-linked-hint {
-  margin: 8px 0 0;
-  font-size: 11px;
-  line-height: 1.45;
-  color: #94a3b8;
-}
-
-.copilot-topic-rail-mini {
   width: 52px;
   flex-shrink: 0;
   border-right: 1px solid #eef2f7;

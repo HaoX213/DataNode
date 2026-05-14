@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Collection, Delete, Document, EditPen, FolderAdd, Plus, Reading, Upload } from '@element-plus/icons-vue'
+import { Collection, Delete, Document, EditPen, FolderAdd, FolderOpened, Picture, Plus, Reading, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref, watch } from 'vue'
 import KnowledgeGraphCanvas from './KnowledgeGraphCanvas.vue'
@@ -23,6 +23,57 @@ const graphTagFilters = ref<string[]>([])
 
 const graphRepulsion = ref(650)
 const graphEdgeLength = ref(150)
+
+const PRESET_COVERS: { key: string; label: string; css: string }[] = [
+  { key: 'dawn', label: '粉紫', css: 'linear-gradient(145deg, #fce7f3 0%, #e9d5ff 100%)' },
+  { key: 'sea', label: '海天', css: 'linear-gradient(145deg, #e0f2fe 0%, #ddd6fe 100%)' },
+  { key: 'forest', label: '森绿', css: 'linear-gradient(145deg, #d1fae5 0%, #fef3c7 100%)' },
+  { key: 'night', label: '夜读', css: 'linear-gradient(145deg, #1e293b 0%, #334155 100%)' },
+  { key: 'paper', label: '纸纹', css: 'linear-gradient(145deg, #fffef7 0%, #f1f5f9 100%)' }
+]
+
+function parseDnCover(json: string): string | null {
+  try {
+    const o = JSON.parse(json || '{}') as { dnCover?: string }
+    return typeof o.dnCover === 'string' && o.dnCover.trim() ? o.dnCover.trim() : null
+  } catch {
+    return null
+  }
+}
+
+function noteCoverStyle(contentJson: string): Record<string, string> {
+  const c = parseDnCover(contentJson)
+  if (!c) return { background: PRESET_COVERS[4].css }
+  if (c.startsWith('preset:')) {
+    const key = c.slice('preset:'.length)
+    const hit = PRESET_COVERS.find((p) => p.key === key)
+    return { background: hit?.css ?? PRESET_COVERS[0].css }
+  }
+  return {
+    backgroundImage: `url(${c})`,
+    backgroundSize: 'cover',
+    backgroundPosition: 'center'
+  }
+}
+
+const childFolderNodes = computed<TreeNode[]>(() => {
+  const sel = selectedNotebookId.value
+  const roots = treeData.value
+  if (sel == null) return []
+  function find(nodes: TreeNode[], id: number): TreeNode | null {
+    for (const n of nodes) {
+      if (n.id === id) return n
+      if (n.children?.length) {
+        const inChild = find(n.children, id)
+        if (inChild) return inChild
+      }
+    }
+    return null
+  }
+  const node = find(roots, sel)
+  if (!node?.children?.length) return []
+  return node.children
+})
 
 const filteredItems = computed(() => {
   let list = items.value
@@ -97,10 +148,16 @@ async function createFolder(): Promise<void> {
   const res = await ElMessageBox.prompt('文件夹名称', '新建文件夹', {
     confirmButtonText: '创建',
     cancelButtonText: '取消',
-    inputValue: '新建文件夹'
+    inputPlaceholder: '请输入名称',
+    inputValue: ''
   }).catch(() => null)
   if (!res) return
-  const r = await window.api.createBookshelfFolder(res.value.trim() || '新建文件夹', parentId ?? undefined)
+  const name = res.value.trim()
+  if (!name) {
+    ElMessage.warning('名称不能为空')
+    return
+  }
+  const r = await window.api.createBookshelfFolder(name, parentId ?? undefined)
   if (!r.success) {
     ElMessage.warning((r as { message?: string }).message || '创建失败')
     return
@@ -182,6 +239,40 @@ function openItem(it: ItemRow): void {
   }
   const path = it.source_file_path?.trim()
   if (path) void window.api.openPathWithShell(path)
+}
+
+async function onCoverCommand(it: ItemRow, cmd: string): Promise<void> {
+  if (it.type !== 'note') return
+  if (cmd === 'clear') {
+    const r = await window.api.patchNoteCover(it.id, null)
+    if (!r.success) ElMessage.warning(r.message)
+    else await loadItems()
+    return
+  }
+  if (cmd.startsWith('preset:')) {
+    const r = await window.api.patchNoteCover(it.id, cmd)
+    if (!r.success) ElMessage.warning(r.message)
+    else await loadItems()
+    return
+  }
+  if (cmd === 'upload') {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = async () => {
+        const url = String(reader.result || '')
+        const r = await window.api.patchNoteCover(it.id, url)
+        if (!r.success) ElMessage.warning(r.message)
+        else await loadItems()
+      }
+      reader.readAsDataURL(file)
+    }
+    input.click()
+  }
 }
 
 function cardTitle(it: ItemRow): string {
@@ -275,24 +366,73 @@ defineExpose({ refreshLibrary: async () => {
           <div v-if="!selectedNotebookId" class="empty-select">
             <el-empty description="请选择左侧文件夹" />
           </div>
-          <div v-else class="card-grid">
-            <el-card
-              v-for="it in filteredItems"
-              :key="it.id"
-              class="shelf-card"
-              shadow="hover"
-              @click="openItem(it)"
-            >
-              <div class="shelf-card-head">
-                <el-icon v-if="it.type === 'note'" class="shelf-card-icon"><Reading /></el-icon>
-                <el-icon v-else-if="it.type === 'file'" class="shelf-card-icon"><Document /></el-icon>
-                <el-icon v-else class="shelf-card-icon"><Collection /></el-icon>
-                <span class="shelf-card-title">{{ cardTitle(it) }}</span>
+          <div v-else class="library-cards">
+            <section v-if="childFolderNodes.length" class="folder-section">
+              <div class="section-label">文件夹</div>
+              <div class="folder-card-row">
+                <button
+                  v-for="fd in childFolderNodes"
+                  :key="fd.id"
+                  type="button"
+                  class="folder-tile"
+                  @click="onTreeSelect(fd)"
+                >
+                  <div class="folder-tile-icon">
+                    <el-icon :size="28"><FolderOpened /></el-icon>
+                  </div>
+                  <div class="folder-tile-name">{{ fd.name }}</div>
+                </button>
               </div>
-              <div class="shelf-card-meta">{{ it.type }} · {{ it.created_at?.slice(0, 16) }}</div>
-              <p v-if="it.type === 'note'" class="shelf-card-snippet">{{ (it.content_text || '').replace(/<[^>]+>/g, '').slice(0, 120) }}</p>
-            </el-card>
-            <el-empty v-if="!filteredItems.length" description="该文件夹暂无条目" />
+            </section>
+
+            <div class="section-label row-between">
+              <span>笔记与文件</span>
+            </div>
+            <div class="card-grid">
+              <div
+                v-for="it in filteredItems"
+                :key="it.id"
+                class="shelf-card"
+                :class="{ 'shelf-card--note': it.type === 'note' }"
+                @click="openItem(it)"
+              >
+                <template v-if="it.type === 'note'">
+                  <div class="note-cover" :style="noteCoverStyle(it.content_json)">
+                    <el-dropdown trigger="click" @command="(c: string) => onCoverCommand(it, c)" @click.stop>
+                      <el-button class="cover-edit-btn" circle size="small" :icon="Picture" />
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item v-for="pr in PRESET_COVERS" :key="pr.key" :command="`preset:${pr.key}`">
+                            封面 · {{ pr.label }}
+                          </el-dropdown-item>
+                          <el-dropdown-item command="upload">上传图片…</el-dropdown-item>
+                          <el-dropdown-item command="clear" divided>恢复默认</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </div>
+                  <div class="shelf-card-body">
+                    <div class="shelf-card-title-row">
+                      <el-icon class="shelf-card-icon"><Reading /></el-icon>
+                      <span class="shelf-card-title">{{ cardTitle(it) }}</span>
+                    </div>
+                    <div class="shelf-card-meta">创建 {{ it.created_at?.slice(0, 16) }}</div>
+                    <p class="shelf-card-snippet">{{ (it.content_text || '').replace(/<[^>]+>/g, '').slice(0, 96) }}</p>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="shelf-card-body shelf-card-body--file">
+                    <div class="shelf-card-title-row">
+                      <el-icon v-if="it.type === 'file'" class="shelf-card-icon"><Document /></el-icon>
+                      <el-icon v-else class="shelf-card-icon"><Collection /></el-icon>
+                      <span class="shelf-card-title">{{ cardTitle(it) }}</span>
+                    </div>
+                    <div class="shelf-card-meta">{{ it.type }} · {{ it.created_at?.slice(0, 16) }}</div>
+                  </div>
+                </template>
+              </div>
+              <el-empty v-if="!filteredItems.length" description="该文件夹暂无条目" />
+            </div>
           </div>
         </el-scrollbar>
       </main>
@@ -393,16 +533,103 @@ defineExpose({ refreshLibrary: async () => {
   flex: 1;
   padding: 16px;
 }
+.section-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  letter-spacing: 0.02em;
+  margin-bottom: 10px;
+}
+.row-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.library-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.folder-section {
+  margin-bottom: 8px;
+}
+.folder-card-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.folder-tile {
+  width: 112px;
+  padding: 14px 10px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  cursor: pointer;
+  text-align: center;
+  transition:
+    box-shadow 0.15s,
+    transform 0.15s;
+}
+.folder-tile:hover {
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  transform: translateY(-2px);
+}
+.folder-tile-icon {
+  color: #6366f1;
+  margin-bottom: 8px;
+}
+.folder-tile-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
 }
 .shelf-card {
   cursor: pointer;
-  border-radius: 12px;
+  border-radius: 20px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+  transition:
+    box-shadow 0.15s,
+    transform 0.15s;
 }
-.shelf-card-head {
+.shelf-card:hover {
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.1);
+  transform: translateY(-2px);
+}
+.shelf-card--note {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.note-cover {
+  position: relative;
+  height: 108px;
+  border-radius: 20px 20px 0 0;
+}
+.cover-edit-btn {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  opacity: 0.92;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.shelf-card-body {
+  padding: 12px 14px 14px;
+}
+.shelf-card-body--file {
+  padding: 16px 14px;
+}
+.shelf-card-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -410,27 +637,29 @@ defineExpose({ refreshLibrary: async () => {
   color: #0f172a;
 }
 .shelf-card-icon {
-  font-size: 20px;
+  font-size: 18px;
   color: #64748b;
+  flex-shrink: 0;
 }
 .shelf-card-title {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
 }
 .shelf-card-meta {
-  font-size: 12px;
+  font-size: 11px;
   color: #94a3b8;
   margin-top: 6px;
 }
 .shelf-card-snippet {
   margin: 8px 0 0;
-  font-size: 13px;
+  font-size: 12px;
   color: #64748b;
   line-height: 1.45;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }

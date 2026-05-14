@@ -58,6 +58,7 @@ import {
   saveAppSettings,
   setStoragePath,
   updateNodeDetail,
+  patchItemCoverImage,
   updateNodePositions
 } from './db'
 import type { ProjectUiStateV1 } from './db'
@@ -525,6 +526,14 @@ app.whenReady().then(() => {
       return { success: false, message: `保存节点失败: ${String(error)}` }
     }
   })
+  ipcMain.handle('db:items:patch-cover', (_, itemId: number, cover: string | null) => {
+    try {
+      patchItemCoverImage(Number(itemId), cover == null ? null : String(cover))
+      return { success: true, message: '封面已更新' }
+    } catch (error) {
+      return { success: false, message: `更新封面失败: ${String(error)}` }
+    }
+  })
   ipcMain.handle('db:items:open-file', async (_, filePath: string) => {
     try {
       if (!filePath) return { success: false, message: '文件路径为空' }
@@ -560,8 +569,11 @@ app.whenReady().then(() => {
       notebookId?: number
     ) => {
       try {
-        const text = (contentText ?? '').trim()
+        let text = (contentText ?? '').trim()
         const noteTitle = (title ?? '').trim()
+        if (!text && noteTitle) {
+          text = '<p><br></p>'
+        }
         if (!text) {
           return { success: false, message: '笔记内容不能为空' }
         }

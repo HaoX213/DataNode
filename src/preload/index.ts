@@ -214,6 +214,7 @@ export type ProjectUiStateV1 = {
   workspace: {
     tableFilter: string
     searchKeyword: string
+    workspaceTab?: 'dashboard' | 'raw' | 'notes'
   }
   aiCurrentTopicId: number | null
   /** 未写入过该字段的旧数据为 undefined，由前端按当前 dashboard 生成默认两张卡 */
@@ -351,6 +352,8 @@ const api = {
     contentText: string
     tags: string[]
   }): Promise<ActionResult> => ipcRenderer.invoke('db:items:update-detail', payload),
+  patchNoteCover: (itemId: number, cover: string | null): Promise<ActionResult> =>
+    ipcRenderer.invoke('db:items:patch-cover', itemId, cover),
   openFile: (filePath: string): Promise<ActionResult> => ipcRenderer.invoke('db:items:open-file', filePath),
   createNote: (
     title: string,

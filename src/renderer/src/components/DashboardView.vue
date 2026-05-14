@@ -33,7 +33,7 @@ const draggingCardIndex = ref<number | null>(null)
 const chartEditorVisible = ref(false)
 const chartEditorForm = ref<ChartCardConfig | null>(null)
 
-const CARD_W_DEF = 440
+const CARD_W_DEF = 380
 const CARD_H_DEF = 300
 const CARD_W_MIN = 280
 const CARD_W_MAX = 720
