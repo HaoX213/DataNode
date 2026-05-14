@@ -24,6 +24,14 @@ import {
   listItems,
   listNotebooks,
   listProjects,
+  getProjectUiState,
+  saveProjectUiState,
+  listAiTopics,
+  createAiTopic,
+  renameAiTopic,
+  deleteAiTopic,
+  listAiMessages,
+  appendAiMessage,
   removeRelation,
   removeTagFromNode,
   getNodeEdges,
@@ -34,6 +42,7 @@ import {
   updateNodeDetail,
   updateNodePositions
 } from './db'
+import type { ProjectUiStateV1 } from './db'
 import {
   importAssetFile,
   importCsvFile,
@@ -202,6 +211,71 @@ app.whenReady().then(() => {
       return { success: false, message: `删除项目失败: ${String(error)}` }
     }
   })
+  ipcMain.handle('project:ui:get', (_, projectId: number) => {
+    try {
+      return { success: true, data: toSerializable(getProjectUiState(Number(projectId))) }
+    } catch (error) {
+      return { success: false, message: `读取项目界面状态失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('project:ui:save', (_, projectId: number, state: ProjectUiStateV1) => {
+    try {
+      saveProjectUiState(Number(projectId), state as ProjectUiStateV1)
+      return { success: true, message: '已保存' }
+    } catch (error) {
+      return { success: false, message: `保存项目界面状态失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:topics:list', (_, projectId: number) => {
+    try {
+      return { success: true, data: toSerializable(listAiTopics(Number(projectId))) }
+    } catch (error) {
+      return { success: false, message: `读取话题失败: ${String(error)}`, data: [] }
+    }
+  })
+  ipcMain.handle('ai:topic:create', (_, projectId: number, title: string) => {
+    try {
+      const id = createAiTopic(Number(projectId), String(title ?? ''))
+      return { success: true, data: { id }, message: '话题已创建' }
+    } catch (error) {
+      return { success: false, message: `创建话题失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:topic:rename', (_, topicId: number, title: string) => {
+    try {
+      renameAiTopic(Number(topicId), String(title ?? ''))
+      return { success: true, message: '已重命名' }
+    } catch (error) {
+      return { success: false, message: `重命名失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:topic:delete', (_, topicId: number) => {
+    try {
+      deleteAiTopic(Number(topicId))
+      return { success: true, message: '已删除' }
+    } catch (error) {
+      return { success: false, message: `删除话题失败: ${String(error)}` }
+    }
+  })
+  ipcMain.handle('ai:messages:list', (_, topicId: number) => {
+    try {
+      return { success: true, data: toSerializable(listAiMessages(Number(topicId))) }
+    } catch (error) {
+      return { success: false, message: `读取消息失败: ${String(error)}`, data: [] }
+    }
+  })
+  ipcMain.handle(
+    'ai:messages:append',
+    (_, topicId: number, role: string, content: string, chartJson?: string | null) => {
+      try {
+        const safeRole = role === 'assistant' ? 'assistant' : 'user'
+        appendAiMessage(Number(topicId), safeRole, String(content ?? ''), chartJson ?? null)
+        return { success: true, message: '已写入' }
+      } catch (error) {
+        return { success: false, message: `写入消息失败: ${String(error)}` }
+      }
+    }
+  )
   ipcMain.handle('db:items:list', (_, projectId?: number) => listItems(Number(projectId)))
   ipcMain.handle('db:items:search', (_, keyword: string, projectId?: number) => searchItems(keyword ?? '', Number(projectId)))
   ipcMain.handle('settings:get', () => {

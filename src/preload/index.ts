@@ -172,6 +172,65 @@ export type AiChatMessage = {
   content: string
 }
 
+export type DashboardUiPersistV1 = {
+  statField: string
+  catField: string
+  groupField: string
+  aggregateField: string
+  aggregateType: 'sum' | 'avg' | 'count'
+}
+
+export type ProjectUiStateV1 = {
+  dashboard: DashboardUiPersistV1
+  workspace: {
+    tableFilter: string
+    searchKeyword: string
+  }
+  aiCurrentTopicId: number | null
+  chartConfigurations?: unknown[]
+}
+
+export type AiTopicRow = {
+  id: number
+  project_id: number
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export type AiMessageRow = {
+  id: number
+  topic_id: number
+  role: 'user' | 'assistant'
+  content: string
+  chart_json: string | null
+  created_at: string
+}
+
+export type AiTopicsResult = {
+  success: boolean
+  message?: string
+  data: AiTopicRow[]
+}
+
+export type AiMessagesResult = {
+  success: boolean
+  message?: string
+  data: AiMessageRow[]
+}
+
+export type ProjectUiStateResult = {
+  success: boolean
+  message?: string
+  data?: ProjectUiStateV1
+}
+
+export type AiTopicCreateResult = {
+  success: boolean
+  message?: string
+  data?: { id: number }
+}
+
 export type AiChatResult = {
   success: boolean
   message?: string
@@ -267,9 +326,27 @@ const api = {
     project_id?: number | null
     raw_file_preview?: string
     raw_file_path?: string
-  }): Promise<AiChatResult> => ipcRenderer.invoke('ai:chat', payload)
+  }): Promise<AiChatResult> => ipcRenderer.invoke('ai:chat', payload),
+  getProjectUiState: (projectId: number): Promise<ProjectUiStateResult> =>
+    ipcRenderer.invoke('project:ui:get', projectId),
+  saveProjectUiState: (projectId: number, state: ProjectUiStateV1): Promise<ActionResult> =>
+    ipcRenderer.invoke('project:ui:save', projectId, state),
+  listAiTopics: (projectId: number): Promise<AiTopicsResult> => ipcRenderer.invoke('ai:topics:list', projectId),
+  createAiTopic: (projectId: number, title: string): Promise<AiTopicCreateResult> =>
+    ipcRenderer.invoke('ai:topic:create', projectId, title),
+  renameAiTopic: (topicId: number, title: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('ai:topic:rename', topicId, title),
+  deleteAiTopic: (topicId: number): Promise<ActionResult> => ipcRenderer.invoke('ai:topic:delete', topicId),
+  listAiMessages: (topicId: number): Promise<AiMessagesResult> => ipcRenderer.invoke('ai:messages:list', topicId),
+  appendAiMessage: (
+    topicId: number,
+    role: 'user' | 'assistant',
+    content: string,
+    chartJson?: string | null
+  ): Promise<ActionResult> => ipcRenderer.invoke('ai:messages:append', topicId, role, content, chartJson ?? null)
 }
 
+export type AppApi = typeof api
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise
 // just add to the DOM global.

@@ -66,7 +66,7 @@ function onRowClick(row: FlattenedItemRow): void {
           <span class="text-slate-700">{{ summarizeContent(row) }}</span>
         </template>
       </el-table-column>
-      <template v-if="currentTableFilter !== 'all' && String(currentTableFilter).includes('excel')">
+      <template v-if="dynamicColumns.length > 0">
         <el-table-column
           v-for="col in dynamicColumns"
           :key="col"

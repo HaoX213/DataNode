@@ -93,6 +93,212 @@ function ensureItemPositionColumns(database: Database.Database): void {
   }
 }
 
+function ensureProjectUiAndAiTables(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS project_ui_state (
+      project_id    INTEGER PRIMARY KEY,
+      ui_json       TEXT NOT NULL DEFAULT '{}',
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_chat_topics (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id    INTEGER NOT NULL,
+      title         TEXT NOT NULL,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_chat_topics_project_id ON ai_chat_topics(project_id);
+
+    CREATE TABLE IF NOT EXISTS ai_chat_messages (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      topic_id      INTEGER NOT NULL,
+      role          TEXT NOT NULL CHECK(role IN ('user','assistant')),
+      content       TEXT NOT NULL,
+      chart_json    TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (topic_id) REFERENCES ai_chat_topics(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_topic_id ON ai_chat_messages(topic_id);
+  `)
+}
+
+export type DashboardUiPersistV1 = {
+  statField: string
+  catField: string
+  groupField: string
+  aggregateField: string
+  aggregateType: 'sum' | 'avg' | 'count'
+}
+
+export type ProjectUiStateV1 = {
+  dashboard: DashboardUiPersistV1
+  workspace: {
+    tableFilter: string
+    searchKeyword: string
+  }
+  aiCurrentTopicId: number | null
+  chartConfigurations?: unknown[]
+}
+
+function defaultDashboardUi(): DashboardUiPersistV1 {
+  return {
+    statField: '',
+    catField: '',
+    groupField: '',
+    aggregateField: '',
+    aggregateType: 'sum'
+  }
+}
+
+function defaultProjectUiState(): ProjectUiStateV1 {
+  return {
+    dashboard: defaultDashboardUi(),
+    workspace: { tableFilter: 'all', searchKeyword: '' },
+    aiCurrentTopicId: null,
+    chartConfigurations: []
+  }
+}
+
+export function getProjectUiState(projectId: number): ProjectUiStateV1 {
+  const database = getDb()
+  const row = database.prepare('SELECT ui_json FROM project_ui_state WHERE project_id = ?').get(projectId) as
+    | { ui_json: string }
+    | undefined
+  if (!row?.ui_json?.trim()) return defaultProjectUiState()
+  try {
+    const parsed = JSON.parse(row.ui_json) as Partial<ProjectUiStateV1>
+    const base = defaultProjectUiState()
+    const aggRaw = String((parsed.dashboard as { aggregateType?: string } | undefined)?.aggregateType ?? 'sum').toLowerCase()
+    const aggregateType: DashboardUiPersistV1['aggregateType'] =
+      aggRaw === 'avg' || aggRaw === 'average' ? 'avg' : aggRaw === 'count' ? 'count' : 'sum'
+    return {
+      ...base,
+      ...parsed,
+      dashboard: {
+        ...defaultDashboardUi(),
+        ...(parsed.dashboard ?? {}),
+        aggregateType
+      },
+      workspace: {
+        ...base.workspace,
+        ...(parsed.workspace ?? {})
+      },
+      aiCurrentTopicId:
+        typeof parsed.aiCurrentTopicId === 'number' && Number.isFinite(parsed.aiCurrentTopicId)
+          ? parsed.aiCurrentTopicId
+          : parsed.aiCurrentTopicId === null
+            ? null
+            : base.aiCurrentTopicId,
+      chartConfigurations: Array.isArray(parsed.chartConfigurations) ? parsed.chartConfigurations : []
+    }
+  } catch {
+    return defaultProjectUiState()
+  }
+}
+
+export function saveProjectUiState(projectId: number, state: ProjectUiStateV1): void {
+  const database = getDb()
+  const merged: ProjectUiStateV1 = {
+    ...defaultProjectUiState(),
+    ...state,
+    dashboard: {
+      ...defaultDashboardUi(),
+      ...state.dashboard,
+      aggregateType: state.dashboard?.aggregateType === 'avg' || state.dashboard?.aggregateType === 'count' ? state.dashboard.aggregateType : 'sum'
+    },
+    workspace: {
+      ...defaultProjectUiState().workspace,
+      ...state.workspace
+    },
+    chartConfigurations: Array.isArray(state.chartConfigurations) ? state.chartConfigurations : []
+  }
+  database
+    .prepare(`
+      INSERT INTO project_ui_state (project_id, ui_json, updated_at)
+      VALUES (@project_id, @ui_json, datetime('now'))
+      ON CONFLICT(project_id) DO UPDATE SET
+        ui_json = excluded.ui_json,
+        updated_at = excluded.updated_at
+    `)
+    .run({ project_id: projectId, ui_json: JSON.stringify(merged) })
+}
+
+export type AiTopicRow = {
+  id: number
+  project_id: number
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export type AiMessageRow = {
+  id: number
+  topic_id: number
+  role: 'user' | 'assistant'
+  content: string
+  chart_json: string | null
+  created_at: string
+}
+
+export function listAiTopics(projectId: number): AiTopicRow[] {
+  return getDb()
+    .prepare(
+      `
+      SELECT id, project_id, title, created_at, updated_at
+      FROM ai_chat_topics
+      WHERE project_id = ?
+      ORDER BY datetime(updated_at) DESC, id DESC
+    `
+    )
+    .all(projectId) as AiTopicRow[]
+}
+
+export function createAiTopic(projectId: number, title: string): number {
+  const database = getDb()
+  const normalized = title.trim() || '新话题'
+  const result = database.prepare('INSERT INTO ai_chat_topics (project_id, title) VALUES (?, ?)').run(projectId, normalized)
+  return Number(result.lastInsertRowid)
+}
+
+export function renameAiTopic(topicId: number, title: string): void {
+  getDb()
+    .prepare(`UPDATE ai_chat_topics SET title = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(title.trim() || '未命名话题', topicId)
+}
+
+export function deleteAiTopic(topicId: number): void {
+  getDb().prepare('DELETE FROM ai_chat_topics WHERE id = ?').run(topicId)
+}
+
+export function listAiMessages(topicId: number): AiMessageRow[] {
+  return getDb()
+    .prepare(
+      `
+      SELECT id, topic_id, role, content, chart_json, created_at
+      FROM ai_chat_messages
+      WHERE topic_id = ?
+      ORDER BY id ASC
+    `
+    )
+    .all(topicId) as AiMessageRow[]
+}
+
+export function appendAiMessage(
+  topicId: number,
+  role: 'user' | 'assistant',
+  content: string,
+  chartJson?: string | null
+): void {
+  const database = getDb()
+  database
+    .prepare('INSERT INTO ai_chat_messages (topic_id, role, content, chart_json) VALUES (?, ?, ?, ?)')
+    .run(topicId, role, content, chartJson ?? null)
+  database.prepare(`UPDATE ai_chat_topics SET updated_at = datetime('now') WHERE id = ?`).run(topicId)
+}
+
 function tableExists(database: Database.Database, tableName: string): boolean {
   const row = database
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -250,6 +456,7 @@ export function initDatabase(): void {
   ensureItemsProjectColumn(database, defaultProjectId)
   ensureItemsSupportsAssetNodes(database)
   ensureItemPositionColumns(database)
+  ensureProjectUiAndAiTables(database)
 
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_node_tags_node_id ON node_tags(node_id);

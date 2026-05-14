@@ -1,14 +1,24 @@
 <script setup lang="ts">
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+
+type DashboardUiPersistV1 = {
+  statField: string
+  catField: string
+  groupField: string
+  aggregateField: string
+  aggregateType: 'sum' | 'avg' | 'count'
+}
 
 const props = defineProps<{
   projectId: number | null
+  savedDashboard: DashboardUiPersistV1
 }>()
 
 const emit = defineEmits<{
   (e: 'refresh'): void
+  (e: 'dashboard-persist', payload: DashboardUiPersistV1): void
 }>()
 
 const loading = ref(false)
@@ -20,6 +30,37 @@ const catField = ref('')
 const groupField = ref('')
 const aggregateField = ref('')
 const aggregateType = ref<'sum' | 'avg' | 'count'>('sum')
+
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+
+function getPersistableDashboard(): DashboardUiPersistV1 {
+  return {
+    statField: statField.value,
+    catField: catField.value,
+    groupField: groupField.value,
+    aggregateField: aggregateField.value,
+    aggregateType: aggregateType.value
+  }
+}
+
+function schedulePersistEmit(): void {
+  if (persistTimer) clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    emit('dashboard-persist', getPersistableDashboard())
+  }, 320)
+}
+
+function applySavedDashboard(saved: DashboardUiPersistV1): void {
+  const pickNum = (v: string): string => (v && numericFields.value.includes(v) ? v : '')
+  const pickAny = (v: string): string => (v && allFields.value.includes(v) ? v : '')
+  const agg = saved.aggregateType === 'avg' || saved.aggregateType === 'count' ? saved.aggregateType : 'sum'
+  statField.value = pickNum(saved.statField)
+  catField.value = pickAny(saved.catField)
+  groupField.value = pickAny(saved.groupField)
+  aggregateField.value = pickNum(saved.aggregateField)
+  aggregateType.value = agg
+}
 
 const sumVal = ref<number | null>(null)
 const avgVal = ref<number | null>(null)
@@ -38,6 +79,11 @@ async function loadFields(): Promise<void> {
     rowCount.value = 0
     allFields.value = []
     numericFields.value = []
+    statField.value = ''
+    catField.value = ''
+    groupField.value = ''
+    aggregateField.value = ''
+    aggregateType.value = 'sum'
     return
   }
   loading.value = true
@@ -51,10 +97,7 @@ async function loadFields(): Promise<void> {
     rowCount.value = d.rowCount ?? 0
     allFields.value = d.allFields ?? []
     numericFields.value = d.numericFields ?? []
-    if (!statField.value && numericFields.value.length) statField.value = numericFields.value[0]!
-    if (!catField.value && allFields.value.length) catField.value = allFields.value[0]!
-    if (!groupField.value && allFields.value.length) groupField.value = allFields.value[0]!
-    if (!aggregateField.value && numericFields.value.length) aggregateField.value = numericFields.value[0]!
+    applySavedDashboard(props.savedDashboard)
   } finally {
     loading.value = false
   }
@@ -144,8 +187,11 @@ watch(
   () => props.projectId,
   () => {
     void loadFields()
-  }
+  },
+  { immediate: true }
 )
+
+watch([statField, catField, groupField, aggregateField, aggregateType], schedulePersistEmit)
 
 watch([statField, () => props.projectId], () => {
   void runNumericStats()
@@ -163,16 +209,15 @@ watch(loading, (v) => {
   if (!v) void nextTick(() => resizeChart())
 })
 
-onMounted(() => {
-  void loadFields()
-})
-
 onBeforeUnmount(() => {
+  if (persistTimer) clearTimeout(persistTimer)
   chartPie?.dispose()
   chartPie = null
   chartBar?.dispose()
   chartBar = null
 })
+
+defineExpose({ loadFields, resizeChart, getPersistableDashboard })
 
 defineExpose({ loadFields, resizeChart })
 </script>
