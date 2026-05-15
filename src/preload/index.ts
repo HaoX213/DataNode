@@ -350,6 +350,10 @@ const api = {
     projectId: number
   ): Promise<ActionResult & { data?: { ids: number[] } }> =>
     ipcRenderer.invoke('project:documents:copy-from-bookshelf', itemIds, projectId),
+  renameProjectDocument: (itemId: number, projectId: number, title: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('project:item:rename', itemId, projectId, title),
+  deleteProjectDocument: (itemId: number, projectId: number): Promise<ActionResult> =>
+    ipcRenderer.invoke('project:item:delete', itemId, projectId),
   openPathWithShell: (filePath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('shell:open-path', filePath),
   listProjects: (): Promise<ProjectsResult> => ipcRenderer.invoke('projects:list'),

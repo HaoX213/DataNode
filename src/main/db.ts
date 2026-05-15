@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
-import { copyFileSync, mkdirSync } from 'node:fs'
-import { basename, extname, join, resolve } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
+import { basename, extname, join, resolve, sep } from 'node:path'
 
 let db: Database.Database | null = null
 let initialized = false
@@ -1371,7 +1371,81 @@ export function insertNoteItem(args: {
   return tx()
 }
 
-/** 将书柜全局条目复制到指定项目（笔记深拷贝正文与标签；文件复制到 project-files/{id}/） */
+function mergeItemContentJson(database: Database.Database, itemId: number, patch: Record<string, unknown>): void {
+  const r = database.prepare('SELECT content_json FROM items WHERE id = ?').get(itemId) as
+    | { content_json: string }
+    | undefined
+  if (!r) return
+  let base: Record<string, unknown> = {}
+  try {
+    base = r.content_json?.trim() ? (JSON.parse(r.content_json) as Record<string, unknown>) : {}
+  } catch {
+    base = {}
+  }
+  const merged = JSON.stringify({ ...base, ...patch })
+  database.prepare(`UPDATE items SET content_json = @cj, updated_at = datetime('now') WHERE id = @id`).run({
+    cj: merged,
+    id: itemId
+  })
+}
+
+export function renameProjectItem(itemId: number, projectId: number, nextTitle: string): void {
+  const database = getDb()
+  const pid = Number(projectId)
+  if (!Number.isFinite(pid) || pid <= 0) throw new Error('无效项目')
+  const row = database
+    .prepare('SELECT id, project_id, type, content_json FROM items WHERE id = ?')
+    .get(itemId) as
+    | { id: number; project_id: number | null; type: ItemRow['type']; content_json: string }
+    | undefined
+  if (!row) throw new Error('条目不存在')
+  if (row.project_id !== pid) throw new Error('非当前项目条目')
+  const t = nextTitle.trim() || '未命名'
+  let contentJson = row.content_json || ''
+  try {
+    const p = contentJson ? (JSON.parse(contentJson) as Record<string, unknown>) : {}
+    contentJson = JSON.stringify({ ...p, title: t })
+  } catch {
+    contentJson = JSON.stringify({ title: t })
+  }
+  database
+    .prepare(`UPDATE items SET title = @title, content_json = @cj, updated_at = datetime('now') WHERE id = @id`)
+    .run({ id: itemId, title: t, cj: contentJson })
+}
+
+/** 删除当前项目下的笔记/文档条目；删除 project-files 下副本；不触动书柜原件 */
+export function deleteProjectDocumentItem(itemId: number, projectId: number): void {
+  const database = getDb()
+  const pid = Number(projectId)
+  if (!Number.isFinite(pid) || pid <= 0) throw new Error('无效项目')
+  const row = database
+    .prepare(
+      'SELECT id, project_id, type, source_file_path FROM items WHERE id = ?'
+    )
+    .get(itemId) as { id: number; project_id: number | null; type: ItemRow['type']; source_file_path: string } | undefined
+  if (!row) throw new Error('条目不存在')
+  if (row.project_id !== pid) throw new Error('该条目不属于当前项目')
+
+  const sp = row.source_file_path?.trim()
+  if (sp && (row.type === 'file' || row.type === 'document')) {
+    try {
+      const ud = resolve(app.getPath('userData'))
+      const abs = resolve(sp)
+      const prefix = ud + sep
+      const safe = abs === ud || abs.startsWith(prefix)
+      if (safe && existsSync(abs)) {
+        unlinkSync(abs)
+      }
+    } catch {
+      /* 忽略单文件删除失败，仍删除库记录 */
+    }
+  }
+
+  database.prepare('DELETE FROM node_relations WHERE source_id = ? OR target_id = ?').run(itemId, itemId)
+  database.prepare('DELETE FROM node_tags WHERE node_id = ?').run(itemId)
+  database.prepare('DELETE FROM items WHERE id = ?').run(itemId)
+}
+
 export function copyBookshelfItemsToProject(itemIds: number[], projectId: number): number[] {
   const database = getDb()
   const pid = Number(projectId)
@@ -1418,6 +1492,7 @@ export function copyBookshelfItemsToProject(itemIds: number[], projectId: number
       for (const t of tagRows) {
         database.prepare('INSERT OR IGNORE INTO node_tags (node_id, tag_id) VALUES (?, ?)').run(newId, t.tag_id)
       }
+      mergeItemContentJson(database, newId, { dnCopiedFromBookshelf: true, dnSourceBookshelfItemId: id })
       inserted.push(newId)
       continue
     }
@@ -1446,6 +1521,7 @@ export function copyBookshelfItemsToProject(itemIds: number[], projectId: number
         contentText: row.content_text || '',
         docKind
       })
+      mergeItemContentJson(database, nid, { dnCopiedFromBookshelf: true, dnSourceBookshelfItemId: id })
       inserted.push(nid)
       continue
     }
@@ -1468,6 +1544,7 @@ export function copyBookshelfItemsToProject(itemIds: number[], projectId: number
       originalFilePath: src,
       extension: ext || extname(dest)
     })
+    mergeItemContentJson(database, aid, { dnCopiedFromBookshelf: true, dnSourceBookshelfItemId: id })
     inserted.push(aid)
   }
 

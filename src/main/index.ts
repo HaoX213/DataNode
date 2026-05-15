@@ -11,6 +11,8 @@ import {
   clearItemsForRetest,
   createProject,
   deleteProject,
+  renameProjectItem,
+  deleteProjectDocumentItem,
   getDefaultNotebookId,
   getAllTags,
   getAppSettings,
@@ -348,6 +350,22 @@ app.whenReady().then(() => {
       }
     } catch (error) {
       return { success: false, message: String(error), data: { ids: [] as number[] } }
+    }
+  })
+  ipcMain.handle('project:item:rename', (_, itemId: number, projectId: number, title: string) => {
+    try {
+      renameProjectItem(Number(itemId), Number(projectId), String(title ?? ''))
+      return { success: true, message: '已重命名' }
+    } catch (error) {
+      return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('project:item:delete', (_, itemId: number, projectId: number) => {
+    try {
+      deleteProjectDocumentItem(Number(itemId), Number(projectId))
+      return { success: true, message: '已移除' }
+    } catch (error) {
+      return { success: false, message: String(error) }
     }
   })
   ipcMain.handle('shell:open-path', (_, filePath: string) => {

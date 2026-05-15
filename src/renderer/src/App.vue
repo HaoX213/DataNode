@@ -7,7 +7,7 @@ import RawDataView from './components/RawDataView.vue'
 import BookshelfView from './components/BookshelfView.vue'
 import NoteEditorShell from './components/NoteEditorShell.vue'
 import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
-import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, MagicStick, MoreFilled, Picture, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
+import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Grid, Hide, List, MagicStick, MoreFilled, Picture, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
 
 type ItemRow = {
   id: number
@@ -154,6 +154,11 @@ const globalLinkedProjectIds = ref<number[]>([])
 const projectNotesList = ref<ItemRow[]>([])
 const projectRefList = ref<ItemRow[]>([])
 const projectDocSubTab = ref<'notes' | 'refs'>('notes')
+const projectDocViewMode = ref<'tabs' | 'unified'>('tabs')
+const projectDocContextVisible = ref(false)
+const projectDocMenuX = ref(0)
+const projectDocMenuY = ref(0)
+const projectDocContextItem = ref<ItemRow | null>(null)
 const projectImportFromBookshelfVisible = ref(false)
 const bookshelfImportList = ref<ItemRow[]>([])
 const bookshelfSelectedForProject = ref<ItemRow[]>([])
@@ -1074,6 +1079,116 @@ function refCardIcon(it: ItemRow): typeof Document {
   return parseItemDocKind(it) === 'image' ? Picture : Document
 }
 
+function isCopiedFromBookshelfItem(it: ItemRow): boolean {
+  try {
+    const o = JSON.parse(it.content_json || '{}') as { dnCopiedFromBookshelf?: boolean }
+    return o.dnCopiedFromBookshelf === true
+  } catch {
+    return false
+  }
+}
+
+function toggleProjectDocViewMode(): void {
+  projectDocViewMode.value = projectDocViewMode.value === 'tabs' ? 'unified' : 'tabs'
+}
+
+type UnifiedGroupKey = 'note' | 'word' | 'pdf' | 'image' | 'other'
+
+const projectDocUnifiedGroups = computed(() => {
+  const all = [...projectNotesList.value, ...projectRefList.value]
+  const buckets: Record<UnifiedGroupKey, ItemRow[]> = {
+    note: [],
+    word: [],
+    pdf: [],
+    image: [],
+    other: []
+  }
+  for (const it of all) {
+    if (it.type === 'note') {
+      buckets.note.push(it)
+      continue
+    }
+    const k = parseItemDocKind(it)
+    if (k === 'word') buckets.word.push(it)
+    else if (k === 'pdf') buckets.pdf.push(it)
+    else if (k === 'image') buckets.image.push(it)
+    else buckets.other.push(it)
+  }
+  const order: Array<{ key: UnifiedGroupKey; label: string; emoji: string }> = [
+    { key: 'note', label: '项目笔记', emoji: '📝' },
+    { key: 'word', label: 'Word 文档', emoji: '📄' },
+    { key: 'pdf', label: 'PDF', emoji: '📕' },
+    { key: 'image', label: '图片资料', emoji: '🖼️' },
+    { key: 'other', label: '其他资料', emoji: '📎' }
+  ]
+  return order.map((o) => ({ ...o, items: buckets[o.key] })).filter((g) => g.items.length > 0)
+})
+
+function showProjectDocContextMenu(ev: MouseEvent, it: ItemRow): void {
+  ev.preventDefault()
+  closeContextMenu()
+  projectDocContextItem.value = it
+  projectDocMenuX.value = ev.clientX + 4
+  projectDocMenuY.value = ev.clientY + 4
+  projectDocContextVisible.value = true
+}
+
+async function handleProjectDocMenuOpen(): Promise<void> {
+  const it = projectDocContextItem.value
+  closeProjectDocContextMenu()
+  if (!it) return
+  openProjectDocumentItem(it)
+}
+
+async function handleProjectDocMenuRename(): Promise<void> {
+  const it = projectDocContextItem.value
+  if (!it || currentProjectId.value == null) return
+  const cur = it.title?.trim() || (it.type === 'note' ? `笔记 #${it.id}` : `文档 #${it.id}`)
+  const res = await ElMessageBox.prompt('请输入新标题', '重命名', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    inputValue: cur,
+    inputPattern: /\S+/,
+    inputErrorMessage: '标题不能为空'
+  }).catch(() => null)
+  closeProjectDocContextMenu()
+  if (!res) return
+  const r = await window.api.renameProjectDocument(it.id, currentProjectId.value, res.value.trim())
+  if (!r.success) {
+    ElMessage.error(r.message || '重命名失败')
+    return
+  }
+  ElMessage.success('已重命名')
+  await loadProjectDocuments()
+}
+
+async function handleProjectDocMenuDelete(): Promise<void> {
+  const it = projectDocContextItem.value
+  if (!it || currentProjectId.value == null) return
+  const fromShelf = isCopiedFromBookshelfItem(it)
+  try {
+    await ElMessageBox.confirm(
+      fromShelf
+        ? '确定从当前项目中移除此文档吗？书柜中的原件将保留。'
+        : '确定从当前项目中删除此文档吗？将删除项目内的记录及已保存的本地副本（若存在），且不可恢复。',
+      '确认移除',
+      { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' }
+    )
+  } catch {
+    closeProjectDocContextMenu()
+    return
+  }
+  closeProjectDocContextMenu()
+  const r = await window.api.deleteProjectDocument(it.id, currentProjectId.value)
+  if (!r.success) {
+    ElMessage.error(r.message || '删除失败')
+    return
+  }
+  ElMessage.success(r.message || '已移除')
+  await loadProjectDocuments()
+  await runSearch()
+}
+
 async function openProjectReference(it: ItemRow): Promise<void> {
   const p = it.source_file_path?.trim()
   if (!p) {
@@ -1082,6 +1197,14 @@ async function openProjectReference(it: ItemRow): Promise<void> {
   }
   const r = await window.api.openPathWithShell(p)
   if (!r.success) ElMessage.warning(r.message || '打开失败')
+}
+
+function openProjectDocumentItem(it: ItemRow): void {
+  if (it.type === 'note') {
+    void openProjectNote(it.id)
+    return
+  }
+  void openProjectReference(it)
 }
 
 async function onProjectImportCommand(cmd: 'local' | 'bookshelf'): Promise<void> {
@@ -1152,6 +1275,7 @@ const saveEdit = (): void => {
 
 const showContextMenu = (event: MouseEvent, nodeData: Record<string, any>): void => {
   event.preventDefault()
+  closeProjectDocContextMenu()
   contextMenuVisible.value = true
   contextMenuX.value = event.clientX + 10
   contextMenuY.value = event.clientY + 10
@@ -1160,6 +1284,16 @@ const showContextMenu = (event: MouseEvent, nodeData: Record<string, any>): void
 
 const closeContextMenu = (): void => {
   contextMenuVisible.value = false
+}
+
+const closeProjectDocContextMenu = (): void => {
+  projectDocContextVisible.value = false
+  projectDocContextItem.value = null
+}
+
+function dismissAllContextMenus(): void {
+  closeContextMenu()
+  closeProjectDocContextMenu()
 }
 
 const handleMenuDetail = (): void => {
@@ -2385,7 +2519,7 @@ watch([graphTypeFilters, graphTagFilters], async () => {
 onMounted(async () => {
   loadStoragePath()
   window.addEventListener('resize', resizeGraph)
-  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('click', dismissAllContextMenus)
   if (!storagePath.value.trim()) {
     firstLaunchStorageDialogVisible.value = true
     return
@@ -2412,7 +2546,7 @@ onBeforeUnmount(() => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('click', dismissAllContextMenus)
 })
 </script>
 
@@ -2626,47 +2760,96 @@ onUnmounted(() => {
                 </template>
               </el-dropdown>
               <el-button text :icon="Refresh" @click="loadProjectDocuments">刷新</el-button>
+              <el-tooltip :content="projectDocViewMode === 'tabs' ? '切换为分类瀑布流' : '切换为分栏标签'" placement="bottom">
+                <el-button circle text :icon="projectDocViewMode === 'tabs' ? Grid : List" @click="toggleProjectDocViewMode" />
+              </el-tooltip>
             </div>
-            <el-tabs v-model="projectDocSubTab" class="project-docs-subtabs" type="card">
-              <el-tab-pane label="项目笔记" name="notes">
-                <div class="project-notes-grid">
-                  <el-card
-                    v-for="n in projectNotesList"
-                    :key="n.id"
-                    class="project-note-card"
-                    shadow="hover"
-                    @click="openProjectNote(n.id)"
-                  >
-                    <div class="pn-title">{{ n.title?.trim() || `笔记 #${n.id}` }}</div>
-                    <div class="pn-meta">{{ n.created_at?.slice(0, 16) }}</div>
-                    <p class="pn-snippet">{{ (n.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
-                  </el-card>
-                  <el-empty v-if="!projectNotesList.length" description="暂无项目笔记" />
-                </div>
-              </el-tab-pane>
-              <el-tab-pane label="参考资料 / 外部文档" name="refs">
-                <div class="project-notes-grid">
-                  <el-card
-                    v-for="it in projectRefList"
-                    :key="it.id"
-                    class="project-note-card project-ref-card"
-                    shadow="hover"
-                    @click="openProjectReference(it)"
-                  >
-                    <div class="pn-ref-head">
-                      <el-icon class="pn-ref-icon" :size="22"><component :is="refCardIcon(it)" /></el-icon>
-                      <span class="pn-ref-kind">{{ refKindLabel(it) }}</span>
-                    </div>
-                    <div class="pn-title">
-                      {{ it.title?.trim() || it.source_file_path?.split(/[/\\]/).pop() || `文档 #${it.id}` }}
-                    </div>
-                    <div class="pn-meta">{{ it.created_at?.slice(0, 16) }}</div>
-                    <p class="pn-snippet">{{ it.source_file_path || '（可点击在系统中打开）' }}</p>
-                  </el-card>
-                  <el-empty v-if="!projectRefList.length" description="暂无外部文档，请使用「导入文档」" />
-                </div>
-              </el-tab-pane>
-            </el-tabs>
+            <template v-if="projectDocViewMode === 'tabs'">
+              <el-tabs v-model="projectDocSubTab" class="project-docs-subtabs" type="card">
+                <el-tab-pane label="项目笔记" name="notes">
+                  <div class="project-notes-grid">
+                    <el-card
+                      v-for="n in projectNotesList"
+                      :key="n.id"
+                      class="project-note-card"
+                      shadow="hover"
+                      @click="openProjectDocumentItem(n)"
+                      @contextmenu.prevent="showProjectDocContextMenu($event, n)"
+                    >
+                      <div class="pn-title">{{ n.title?.trim() || `笔记 #${n.id}` }}</div>
+                      <div class="pn-meta">{{ n.created_at?.slice(0, 16) }}</div>
+                      <p class="pn-snippet">{{ (n.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
+                    </el-card>
+                    <el-empty v-if="!projectNotesList.length" description="暂无项目笔记" />
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="参考资料 / 外部文档" name="refs">
+                  <div class="project-notes-grid">
+                    <el-card
+                      v-for="it in projectRefList"
+                      :key="it.id"
+                      class="project-note-card project-ref-card"
+                      shadow="hover"
+                      @click="openProjectDocumentItem(it)"
+                      @contextmenu.prevent="showProjectDocContextMenu($event, it)"
+                    >
+                      <div class="pn-ref-head">
+                        <el-icon class="pn-ref-icon" :size="22"><component :is="refCardIcon(it)" /></el-icon>
+                        <span class="pn-ref-kind">{{ refKindLabel(it) }}</span>
+                      </div>
+                      <div class="pn-title">
+                        {{ it.title?.trim() || it.source_file_path?.split(/[/\\]/).pop() || `文档 #${it.id}` }}
+                      </div>
+                      <div class="pn-meta">{{ it.created_at?.slice(0, 16) }}</div>
+                      <p class="pn-snippet">{{ it.source_file_path || '（可点击在系统中打开）' }}</p>
+                    </el-card>
+                    <el-empty v-if="!projectRefList.length" description="暂无外部文档，请使用「导入文档」" />
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
+            </template>
+            <div v-else class="project-doc-unified-root">
+              <template v-for="(grp, uidx) in projectDocUnifiedGroups" :key="grp.key">
+                <section
+                  class="project-doc-unified-section"
+                  :class="{ 'is-last': uidx === projectDocUnifiedGroups.length - 1 }"
+                >
+                  <h3 class="project-doc-unified-heading">{{ grp.emoji }} {{ grp.label }}</h3>
+                  <div class="project-notes-grid">
+                    <el-card
+                      v-for="it in grp.items"
+                      :key="it.id"
+                      class="project-note-card"
+                      :class="{ 'project-ref-card': it.type !== 'note' }"
+                      shadow="hover"
+                      @click="openProjectDocumentItem(it)"
+                      @contextmenu.prevent="showProjectDocContextMenu($event, it)"
+                    >
+                      <template v-if="it.type === 'note'">
+                        <div class="pn-title">{{ it.title?.trim() || `笔记 #${it.id}` }}</div>
+                        <div class="pn-meta">{{ it.created_at?.slice(0, 16) }}</div>
+                        <p class="pn-snippet">{{ (it.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
+                      </template>
+                      <template v-else>
+                        <div class="pn-ref-head">
+                          <el-icon class="pn-ref-icon" :size="22"><component :is="refCardIcon(it)" /></el-icon>
+                          <span class="pn-ref-kind">{{ refKindLabel(it) }}</span>
+                        </div>
+                        <div class="pn-title">
+                          {{ it.title?.trim() || it.source_file_path?.split(/[/\\]/).pop() || `文档 #${it.id}` }}
+                        </div>
+                        <div class="pn-meta">{{ it.created_at?.slice(0, 16) }}</div>
+                        <p class="pn-snippet">{{ it.source_file_path || '（可点击在系统中打开）' }}</p>
+                      </template>
+                    </el-card>
+                  </div>
+                </section>
+              </template>
+              <el-empty
+                v-if="!projectNotesList.length && !projectRefList.length"
+                description="暂无项目资料"
+              />
+            </div>
           </div>
         </el-tab-pane>
         <el-tab-pane label="知识图谱" name="graph" lazy>
@@ -3081,6 +3264,35 @@ onUnmounted(() => {
   </el-dialog>
 
   <div
+    v-show="projectDocContextVisible"
+    class="custom-context-menu project-doc-context-menu"
+    :style="{ left: projectDocMenuX + 'px', top: projectDocMenuY + 'px' }"
+    @click.stop
+  >
+    <div class="menu-header">
+      {{
+        projectDocContextItem?.title?.trim() ||
+          (projectDocContextItem?.type === 'note'
+            ? `笔记 #${projectDocContextItem?.id}`
+            : projectDocContextItem?.source_file_path?.split(/[/\\]/).pop() || '文档')
+      }}
+    </div>
+    <div class="menu-item" @click="handleProjectDocMenuOpen">
+      <el-icon><FolderOpened /></el-icon>
+      <span>打开</span>
+    </div>
+    <div class="menu-item" @click="handleProjectDocMenuRename">
+      <el-icon><EditPen /></el-icon>
+      <span>重命名</span>
+    </div>
+    <div class="menu-divider"></div>
+    <div class="menu-item menu-item--danger" @click="handleProjectDocMenuDelete">
+      <el-icon><Delete /></el-icon>
+      <span>从项目移除</span>
+    </div>
+  </div>
+
+  <div
     v-show="contextMenuVisible"
     class="custom-context-menu"
     :style="{ left: contextMenuX + 'px', top: contextMenuY + 'px' }"
@@ -3439,6 +3651,36 @@ onUnmounted(() => {
 .project-docs-subtabs :deep(.el-tab-pane) {
   height: 100%;
 }
+
+.project-doc-unified-root {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.project-doc-unified-section {
+  margin: 20px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed #ccc;
+}
+
+.project-doc-unified-section:first-child {
+  margin-top: 0;
+}
+
+.project-doc-unified-section.is-last {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.project-doc-unified-heading {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
 .pn-ref-head {
   display: flex;
   align-items: center;
@@ -4111,6 +4353,15 @@ onUnmounted(() => {
 .menu-item:hover {
   background-color: #f5f7fa;
   color: #409eff;
+}
+
+.menu-item--danger {
+  color: #f56c6c;
+}
+
+.menu-item--danger:hover {
+  color: #fff;
+  background-color: #f56c6c;
 }
 
 .menu-divider {
