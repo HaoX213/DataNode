@@ -212,7 +212,81 @@ function ensureGlobalAiTables(database: Database.Database): void {
       FOREIGN KEY (topic_id) REFERENCES global_ai_chat_topics(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_global_ai_chat_messages_topic_id ON global_ai_chat_messages(topic_id);
+
+    CREATE TABLE IF NOT EXISTS global_ai_topic_projects (
+      topic_id    INTEGER NOT NULL,
+      project_id  INTEGER NOT NULL,
+      PRIMARY KEY (topic_id, project_id),
+      FOREIGN KEY (topic_id) REFERENCES global_ai_chat_topics(id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS global_ai_topic_notes (
+      topic_id    INTEGER NOT NULL,
+      item_id     INTEGER NOT NULL,
+      PRIMARY KEY (topic_id, item_id),
+      FOREIGN KEY (topic_id) REFERENCES global_ai_chat_topics(id) ON DELETE CASCADE,
+      FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_fragments (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      title            TEXT NOT NULL DEFAULT '',
+      content          TEXT NOT NULL DEFAULT '',
+      source_branch_id INTEGER NOT NULL,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (source_branch_id) REFERENCES global_ai_chat_topics(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_fragments_branch ON knowledge_fragments(source_branch_id);
   `)
+  migrateLegacyGlobalAiLinkedProjectsToTopics(database)
+}
+
+const GLOBAL_AI_BRANCH_LINKS_MIGRATED_KEY = 'global_ai_branch_links_migrated_v18'
+
+/** 将旧版 settings 中的全局关联项目一次性复制到各对话分支，便于按分支管理上下文 */
+function migrateLegacyGlobalAiLinkedProjectsToTopics(database: Database.Database): void {
+  const done = database.prepare('SELECT value FROM settings WHERE key = ?').get(GLOBAL_AI_BRANCH_LINKS_MIGRATED_KEY) as
+    | { value: string }
+    | undefined
+  if (done?.value === '1') return
+
+  const legacyRow = database.prepare('SELECT value FROM settings WHERE key = ?').get(GLOBAL_AI_LINKED_PROJECTS_KEY) as
+    | { value: string }
+    | undefined
+  let legacy: number[] = []
+  if (legacyRow?.value?.trim()) {
+    try {
+      const parsed = JSON.parse(legacyRow.value) as unknown
+      if (Array.isArray(parsed)) {
+        legacy = [...new Set(parsed.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))]
+      }
+    } catch {
+      legacy = []
+    }
+  }
+
+  if (legacy.length > 0) {
+    const topics = database.prepare('SELECT id FROM global_ai_chat_topics').all() as Array<{ id: number }>
+    const ins = database.prepare(
+      'INSERT OR IGNORE INTO global_ai_topic_projects (topic_id, project_id) VALUES (?, ?)'
+    )
+    for (const t of topics) {
+      for (const pid of legacy) {
+        const ok = database.prepare('SELECT 1 FROM projects WHERE id = ?').get(pid) as { '1': number } | undefined
+        if (ok) ins.run(t.id, pid)
+      }
+    }
+  }
+
+  database
+    .prepare(
+      `
+    INSERT INTO settings (key, value, updated_at)
+    VALUES (?, '1', datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `
+    )
+    .run(GLOBAL_AI_BRANCH_LINKS_MIGRATED_KEY)
 }
 
 export type DashboardUiPersistV1 = {
@@ -597,6 +671,164 @@ export function appendGlobalAiMessage(
     .prepare('INSERT INTO global_ai_chat_messages (topic_id, role, content, chart_json) VALUES (?, ?, ?, ?)')
     .run(topicId, role, content, chartJson ?? null)
   database.prepare(`UPDATE global_ai_chat_topics SET updated_at = datetime('now') WHERE id = ?`).run(topicId)
+}
+
+export function getGlobalAiTopicLinkedProjectIds(topicId: number): number[] {
+  const tid = Number(topicId)
+  if (!Number.isFinite(tid) || tid <= 0) return []
+  const rows = getDb()
+    .prepare('SELECT project_id FROM global_ai_topic_projects WHERE topic_id = ? ORDER BY project_id ASC')
+    .all(tid) as Array<{ project_id: number }>
+  return rows.map((r) => r.project_id)
+}
+
+export function setGlobalAiTopicLinkedProjectIds(topicId: number, projectIds: number[]): void {
+  const database = getDb()
+  const tid = Number(topicId)
+  if (!Number.isFinite(tid) || tid <= 0) return
+  const uniq = [...new Set(projectIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+  database.prepare('DELETE FROM global_ai_topic_projects WHERE topic_id = ?').run(tid)
+  const ins = database.prepare('INSERT INTO global_ai_topic_projects (topic_id, project_id) VALUES (?, ?)')
+  for (const pid of uniq) {
+    const ok = database.prepare('SELECT 1 FROM projects WHERE id = ?').get(pid) as { '1': number } | undefined
+    if (ok) ins.run(tid, pid)
+  }
+}
+
+export function getGlobalAiTopicLinkedNoteIds(topicId: number): number[] {
+  const tid = Number(topicId)
+  if (!Number.isFinite(tid) || tid <= 0) return []
+  const rows = getDb()
+    .prepare('SELECT item_id FROM global_ai_topic_notes WHERE topic_id = ? ORDER BY item_id ASC')
+    .all(tid) as Array<{ item_id: number }>
+  return rows.map((r) => r.item_id)
+}
+
+export function setGlobalAiTopicLinkedNoteIds(topicId: number, itemIds: number[]): void {
+  const database = getDb()
+  const tid = Number(topicId)
+  if (!Number.isFinite(tid) || tid <= 0) return
+  const uniq = [...new Set(itemIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+  database.prepare('DELETE FROM global_ai_topic_notes WHERE topic_id = ?').run(tid)
+  const ins = database.prepare('INSERT INTO global_ai_topic_notes (topic_id, item_id) VALUES (?, ?)')
+  for (const iid of uniq) {
+    const ok = database
+      .prepare(`SELECT 1 FROM items WHERE id = ? AND type = 'note' AND project_id IS NULL`)
+      .get(iid) as { '1': number } | undefined
+    if (ok) ins.run(tid, iid)
+  }
+}
+
+export type BookshelfNotePickerRow = { id: number; title: string }
+
+export function listBookshelfNotesForGlobalAiPicker(): BookshelfNotePickerRow[] {
+  return getDb()
+    .prepare(
+      `
+      SELECT id, title FROM items
+      WHERE project_id IS NULL AND type = 'note'
+      ORDER BY datetime(updated_at) DESC, id DESC
+      LIMIT 800
+    `
+    )
+    .all() as BookshelfNotePickerRow[]
+}
+
+export type KnowledgeFragmentRow = {
+  id: number
+  title: string
+  content: string
+  source_branch_id: number
+  created_at: string
+  updated_at: string
+}
+
+export function insertKnowledgeFragment(sourceBranchId: number, title: string, content: string): number {
+  const database = getDb()
+  const tid = Number(sourceBranchId)
+  if (!Number.isFinite(tid) || tid <= 0) throw new Error('无效分支')
+  const t = title.trim() || '未命名主题'
+  const c = content.trim()
+  if (!c) throw new Error('知识内容不能为空')
+  const topicExists = database.prepare('SELECT 1 FROM global_ai_chat_topics WHERE id = ?').get(tid) as
+    | { '1': number }
+    | undefined
+  if (!topicExists) throw new Error('分支不存在')
+  const r = database
+    .prepare('INSERT INTO knowledge_fragments (title, content, source_branch_id) VALUES (?, ?, ?)')
+    .run(t, c, tid)
+  return Number(r.lastInsertRowid)
+}
+
+function tokenizeKnowledgeQuery(q: string): string[] {
+  const raw = q.trim()
+  if (!raw) return []
+  const parts = raw
+    .split(/[\s\u3000,，.;；、]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const out = new Set<string>()
+  for (const p of parts) {
+    if (p.length >= 2) out.add(p)
+  }
+  if (out.size === 0) {
+    const one = raw.replace(/\s+/g, '').slice(0, 48)
+    if (one.length) out.add(one)
+  }
+  return [...out].slice(0, 14)
+}
+
+export function searchKnowledgeFragmentsByKeywords(query: string, limit = 8): KnowledgeFragmentRow[] {
+  const database = getDb()
+  const rawTokens = tokenizeKnowledgeQuery(query)
+  const tokenPatterns: Array<{ pat: string }> = []
+  for (const tok of rawTokens) {
+    const safe = tok.replace(/%/g, '').replace(/_/g, '').slice(0, 64)
+    if (!safe) continue
+    tokenPatterns.push({ pat: `%${safe}%` })
+  }
+  if (tokenPatterns.length === 0) return []
+  const clauses = tokenPatterns
+    .map(() => '(IFNULL(title, "") LIKE ? COLLATE NOCASE OR IFNULL(content, "") LIKE ? COLLATE NOCASE)')
+    .join(' OR ')
+  const args: (string | number)[] = []
+  for (const tp of tokenPatterns) {
+    args.push(tp.pat, tp.pat)
+  }
+  const lim = Math.min(24, Math.max(1, Math.floor(Number(limit)) || 8))
+  const sql = `
+    SELECT id, title, content, source_branch_id, created_at, updated_at
+    FROM knowledge_fragments
+    WHERE ${clauses}
+    ORDER BY datetime(updated_at) DESC, id DESC
+    LIMIT ?
+  `
+  return database.prepare(sql).all(...args, lim) as KnowledgeFragmentRow[]
+}
+
+export function buildGlobalAiLinkedNotesContextBlock(itemIds: number[]): string {
+  const database = getDb()
+  const ids = [...new Set(itemIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))].slice(0, 24)
+  const lines: string[] = []
+  for (const rawId of ids) {
+    const row = database
+      .prepare(`SELECT id, title, content_text FROM items WHERE id = ? AND type = 'note' AND project_id IS NULL`)
+      .get(rawId) as { id: number; title: string; content_text: string } | undefined
+    if (!row) continue
+    const plain = (row.content_text || '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 4500)
+    lines.push(`【书柜笔记 #${row.id}】${row.title || '未命名'}\n${plain || '（无正文）'}`)
+  }
+  return lines.join('\n\n---\n\n')
+}
+
+export function formatKnowledgeFragmentsForPrompt(rows: KnowledgeFragmentRow[]): string {
+  if (!rows.length) return ''
+  const parts = rows.map((r, i) => `（${i + 1}）${r.title || '知识片段'}\n${(r.content || '').trim()}`)
+  return parts.join('\n\n---\n\n').slice(0, 12000)
 }
 
 function tableExists(database: Database.Database, tableName: string): boolean {

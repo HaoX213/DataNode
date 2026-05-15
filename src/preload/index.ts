@@ -277,6 +277,29 @@ export type GlobalAiLinkedProjectsResult = {
   data: number[]
 }
 
+export type BookshelfNotePickerRow = {
+  id: number
+  title: string
+}
+
+export type GlobalAiTopicContextResult = {
+  success: boolean
+  message?: string
+  data: { projectIds: number[]; noteIds: number[] }
+}
+
+export type BookshelfNotesPickerListResult = {
+  success: boolean
+  message?: string
+  data: BookshelfNotePickerRow[]
+}
+
+export type WikiSummarizeBranchResult = {
+  success: boolean
+  message?: string
+  data: { id: number; title: string } | null
+}
+
 export type AiChatResult = {
   success: boolean
   message?: string
@@ -433,6 +456,7 @@ const api = {
     context_node_id?: number | null
     project_id?: number | null
     global_ai?: boolean
+    global_ai_topic_id?: number | null
     linked_project_ids?: number[]
     raw_file_preview?: string
     raw_file_path?: string
@@ -476,7 +500,19 @@ const api = {
   getGlobalAiLinkedProjectIds: (): Promise<GlobalAiLinkedProjectsResult> =>
     ipcRenderer.invoke('ai:global:linked-projects:get'),
   setGlobalAiLinkedProjectIds: (projectIds: number[]): Promise<ActionResult> =>
-    ipcRenderer.invoke('ai:global:linked-projects:set', projectIds)
+    ipcRenderer.invoke('ai:global:linked-projects:set', projectIds),
+  getGlobalAiTopicContext: (topicId: number): Promise<GlobalAiTopicContextResult> =>
+    ipcRenderer.invoke('ai:global:topic:context:get', topicId),
+  setGlobalAiTopicContext: (
+    topicId: number,
+    projectIds: number[],
+    noteIds: number[]
+  ): Promise<ActionResult> =>
+    ipcRenderer.invoke('ai:global:topic:context:set', { topicId, projectIds, noteIds }),
+  listBookshelfNotesForGlobalAi: (): Promise<BookshelfNotesPickerListResult> =>
+    ipcRenderer.invoke('ai:global:bookshelf-notes:list'),
+  summarizeGlobalBranchToWiki: (topicId: number): Promise<WikiSummarizeBranchResult> =>
+    ipcRenderer.invoke('ai:global:wiki:summarize-branch', topicId)
 }
 
 export type AppApi = typeof api

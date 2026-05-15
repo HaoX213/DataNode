@@ -5,7 +5,9 @@ import {
   getAppSettings,
   getExcelStructuredRowsForStats,
   getMergedExcelStructuredRowsForProjects,
+  insertKnowledgeFragment,
   listProjects,
+  listGlobalAiMessages,
   type AiContextNeighbor,
   type AiContextNode
 } from './db'
@@ -30,6 +32,10 @@ export type AiChatOptions = {
   globalAi?: boolean
   /** 全局 AI：勾选的要并入统计上下文的项目 id（跨项目分析） */
   linkedProjectIds?: number[]
+  /** 全局 AI：关联书柜笔记（已格式化的正文块） */
+  linkedNotesContextBlock?: string
+  /** 全局 AI：LLM Wiki 关键词检索片段（已格式化） */
+  wikiMemoryBlock?: string
   rawFilePreview?: string
   rawFilePath?: string
 }
@@ -246,7 +252,7 @@ export async function chatWithKnowledgeBase(
   const dataStatsBlock = isGlobal
     ? linkedIds.length > 0
       ? buildMultiProjectStatsSummary(linkedIds)
-      : '（全局 AI：未勾选「关联项目」时不注入项目表格统计；可在左侧勾选项目以进行跨项目对比、汇总与趋势分析。）'
+      : '（全局 AI：当前对话分支未关联项目时，不注入跨项目表格统计；可通过分支旁「关联项目」图标勾选。）'
     : buildAutoStatsSummary(statsProjectId)
   let rawFileBlock = ''
   if (!isGlobal && options?.rawFilePreview?.trim()) {
@@ -290,6 +296,23 @@ ${neighborText}`
       : '【上下文说明】'
     : '【当前项目结构化数据 — 程序预计算摘要（统计类问题请优先引用此处数字）】'
 
+  const notesBlock = (options?.linkedNotesContextBlock ?? '').trim()
+  const wikiBlock = (options?.wikiMemoryBlock ?? '').trim()
+  const notesSection =
+    isGlobal && notesBlock
+      ? `
+
+【用户为本分支关联的书柜笔记（手动关联）】
+${notesBlock}`
+      : ''
+  const wikiSection =
+    isGlobal && wikiBlock
+      ? `
+
+【LLM Wiki — 根据当前提问检索到的历史知识片段（长期记忆）】
+${wikiBlock}`
+      : ''
+
   const completion = await client.chat.completions.create({
     model: config.model,
     temperature: config.temperature,
@@ -302,6 +325,8 @@ ${contextPrompt}
 
 ${statsSectionLabel}
 ${dataStatsBlock}
+${notesSection}
+${wikiSection}
 ${rawFileBlock}
 ${chartHint}`
       },
@@ -312,4 +337,58 @@ ${chartHint}`
   const content = completion.choices[0]?.message?.content?.trim()
   if (!content) throw new Error('AI 未返回有效内容')
   return content
+}
+
+/**
+ * 将当前全局 AI 分支的对话提炼为知识片段，写入 knowledge_fragments（LLM Wiki）。
+ */
+export async function summarizeGlobalBranchToWiki(topicId: number): Promise<{ id: number; title: string }> {
+  const tid = Number(topicId)
+  if (!Number.isFinite(tid) || tid <= 0) throw new Error('无效分支')
+
+  const rows = listGlobalAiMessages(tid)
+  const lines = rows
+    .filter((m) => m.content?.trim())
+    .map((m) => `${m.role === 'user' ? '用户' : '助手'}: ${m.content.trim()}`)
+  if (lines.length === 0) throw new Error('当前分支没有可总结的对话')
+
+  const transcript = lines.join('\n').slice(0, 24000)
+  const config = getAiConfig()
+  const client = new OpenAI({
+    apiKey: config.apiKey.trim(),
+    ...(config.baseURL ? { baseURL: config.baseURL.trim() } : {})
+  })
+
+  const completion = await client.chat.completions.create({
+    model: config.model,
+    temperature: Math.min(config.temperature, 0.35),
+    messages: [
+      {
+        role: 'system',
+        content:
+          '你是知识库编辑。请将对话整理为一条可复用的知识条目。只输出一个 JSON 对象，不要 markdown 代码块，不要其它说明。格式：{"topic":"简短主题","summary":"结构化要点与结论，可含少量代码片段"}'
+      },
+      {
+        role: 'user',
+        content: `以下是一段多轮对话，请提炼为知识：\n\n${transcript}`
+      }
+    ]
+  })
+
+  const raw = completion.choices[0]?.message?.content?.trim()
+  if (!raw) throw new Error('AI 未返回有效内容')
+
+  let topic = '对话要点'
+  let summary = raw
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+    const parsed = JSON.parse(cleaned) as { topic?: string; summary?: string }
+    if (parsed.topic?.trim()) topic = parsed.topic.trim().slice(0, 200)
+    if (parsed.summary?.trim()) summary = parsed.summary.trim()
+  } catch {
+    summary = raw.slice(0, 12000)
+  }
+
+  const id = insertKnowledgeFragment(tid, topic, summary)
+  return { id, title: topic }
 }

@@ -55,6 +55,14 @@ import {
   setGlobalAiCurrentTopicId,
   getGlobalAiLinkedProjectIds,
   setGlobalAiLinkedProjectIds,
+  getGlobalAiTopicLinkedProjectIds,
+  setGlobalAiTopicLinkedProjectIds,
+  getGlobalAiTopicLinkedNoteIds,
+  setGlobalAiTopicLinkedNoteIds,
+  listBookshelfNotesForGlobalAiPicker,
+  buildGlobalAiLinkedNotesContextBlock,
+  searchKnowledgeFragmentsByKeywords,
+  formatKnowledgeFragmentsForPrompt,
   removeRelation,
   removeTagFromNode,
   getNodeEdges,
@@ -81,7 +89,7 @@ import {
   importFileIntoBookshelf,
   readTextFilePreview
 } from './importer'
-import { chatWithKnowledgeBase, summarizeNodeContext, type AiChatMessage } from './ai'
+import { chatWithKnowledgeBase, summarizeNodeContext, summarizeGlobalBranchToWiki, type AiChatMessage } from './ai'
 import {
   statsAverage,
   statsCount,
@@ -546,6 +554,62 @@ app.whenReady().then(() => {
       return { success: false, message: `保存失败: ${String(error)}` }
     }
   })
+  ipcMain.handle('ai:global:topic:context:get', (_, topicId: number) => {
+    try {
+      const tid = Number(topicId)
+      if (!Number.isFinite(tid) || tid <= 0) {
+        return { success: false, message: '无效分支', data: { projectIds: [], noteIds: [] } }
+      }
+      return {
+        success: true,
+        data: {
+          projectIds: toSerializable(getGlobalAiTopicLinkedProjectIds(tid)),
+          noteIds: toSerializable(getGlobalAiTopicLinkedNoteIds(tid))
+        }
+      }
+    } catch (error) {
+      return {
+        success: false,
+        message: `读取失败: ${String(error)}`,
+        data: { projectIds: [], noteIds: [] }
+      }
+    }
+  })
+  ipcMain.handle(
+    'ai:global:topic:context:set',
+    (_, payload: { topicId?: number; projectIds?: number[]; noteIds?: number[] }) => {
+      try {
+        const tid = Number(payload?.topicId)
+        if (!Number.isFinite(tid) || tid <= 0) throw new Error('无效分支')
+        const pids = Array.isArray(payload?.projectIds)
+          ? [...new Set(payload!.projectIds!.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+          : []
+        const nids = Array.isArray(payload?.noteIds)
+          ? [...new Set(payload!.noteIds!.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+          : []
+        setGlobalAiTopicLinkedProjectIds(tid, pids)
+        setGlobalAiTopicLinkedNoteIds(tid, nids)
+        return { success: true, message: '已保存' }
+      } catch (error) {
+        return { success: false, message: `保存失败: ${String(error)}` }
+      }
+    }
+  )
+  ipcMain.handle('ai:global:bookshelf-notes:list', () => {
+    try {
+      return { success: true, data: toSerializable(listBookshelfNotesForGlobalAiPicker()) }
+    } catch (error) {
+      return { success: false, message: `读取失败: ${String(error)}`, data: [] }
+    }
+  })
+  ipcMain.handle('ai:global:wiki:summarize-branch', async (_, topicId: number) => {
+    try {
+      const out = await summarizeGlobalBranchToWiki(Number(topicId))
+      return { success: true, message: '已存入知识库', data: out }
+    } catch (error) {
+      return { success: false, message: String(error), data: null }
+    }
+  })
   ipcMain.handle('db:items:list', (_, projectId?: number) => {
     const p = Number(projectId)
     if (!Number.isFinite(p) || p <= 0) return []
@@ -820,6 +884,7 @@ app.whenReady().then(() => {
         context_node_id?: number | null
         project_id?: number | null
         global_ai?: boolean
+        global_ai_topic_id?: number | null
         linked_project_ids?: number[]
         raw_file_preview?: string
         raw_file_path?: string
@@ -827,16 +892,44 @@ app.whenReady().then(() => {
     ) => {
       try {
         const rawLinked = payload?.linked_project_ids
-        const linkedProjectIds = Array.isArray(rawLinked)
+        let linkedProjectIds = Array.isArray(rawLinked)
           ? [...new Set(rawLinked.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
           : []
+
+        const isGlobal = Boolean(payload?.global_ai)
+        const gTopicId =
+          payload?.global_ai_topic_id != null && Number.isFinite(Number(payload.global_ai_topic_id))
+            ? Number(payload.global_ai_topic_id)
+            : null
+
+        if (isGlobal && gTopicId != null && gTopicId > 0) {
+          linkedProjectIds = getGlobalAiTopicLinkedProjectIds(gTopicId)
+        }
+
+        const msgs = Array.isArray(payload?.messages) ? payload.messages : []
+        const lastUser = [...msgs].reverse().find((m) => m.role === 'user' && String(m.content ?? '').trim())
+        const userQuery = String(lastUser?.content ?? '').trim()
+
+        let linkedNotesBlock = ''
+        let wikiBlock = ''
+        if (isGlobal && gTopicId != null && gTopicId > 0) {
+          const noteIds = getGlobalAiTopicLinkedNoteIds(gTopicId)
+          linkedNotesBlock = buildGlobalAiLinkedNotesContextBlock(noteIds)
+          if (userQuery) {
+            const hits = searchKnowledgeFragmentsByKeywords(userQuery, 8)
+            wikiBlock = formatKnowledgeFragmentsForPrompt(hits)
+          }
+        }
+
         const answer = await chatWithKnowledgeBase(
           Array.isArray(payload?.messages) ? payload.messages : [],
           payload?.context_node_id ?? undefined,
           {
             projectId: payload?.project_id,
-            globalAi: Boolean(payload?.global_ai),
+            globalAi: isGlobal,
             linkedProjectIds: linkedProjectIds.length ? linkedProjectIds : undefined,
+            linkedNotesContextBlock: linkedNotesBlock || undefined,
+            wikiMemoryBlock: wikiBlock || undefined,
             rawFilePreview: payload?.raw_file_preview,
             rawFilePath: payload?.raw_file_path
           }
