@@ -78,8 +78,9 @@ function ensureItemsProjectColumn(database: Database.Database, defaultProjectId:
   const columnNames = new Set(columns.map((column) => column.name))
   if (!columnNames.has('project_id')) {
     database.exec('ALTER TABLE items ADD COLUMN project_id INTEGER;')
+    /** 仅在首次添加列时回填，避免每次启动把书柜全局条目（project_id IS NULL）误写入默认项目 */
+    database.prepare('UPDATE items SET project_id = ? WHERE project_id IS NULL').run(defaultProjectId)
   }
-  database.prepare('UPDATE items SET project_id = ? WHERE project_id IS NULL').run(defaultProjectId)
 }
 
 function ensureItemPositionColumns(database: Database.Database): void {
@@ -198,7 +199,7 @@ export type ProjectUiStateV1 = {
     tableFilter: string
     searchKeyword: string
     /** 项目工作区上次打开的标签页 */
-    workspaceTab?: 'dashboard' | 'raw' | 'notes'
+    workspaceTab?: 'dashboard' | 'raw' | 'notes' | 'graph'
   }
   aiCurrentTopicId: number | null
   chartConfigurations?: ChartCardConfig[]

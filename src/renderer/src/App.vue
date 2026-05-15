@@ -133,9 +133,8 @@ const projects = ref<ProjectRow[]>([])
 const shellMode = ref<'bookshelf' | 'project'>('bookshelf')
 const currentProjectId = ref<number | null>(null)
 const bookshelfRef = ref<InstanceType<typeof BookshelfView> | null>(null)
-const workspaceTab = ref<'dashboard' | 'raw' | 'notes'>('dashboard')
-/** 项目内嵌图谱已迁到书柜；保留 false 以兼容遗留分支 */
-const isGraphOpen = computed(() => false)
+const workspaceTab = ref<'dashboard' | 'raw' | 'notes' | 'graph'>('dashboard')
+const isGraphOpen = computed(() => shellMode.value === 'project' && workspaceTab.value === 'graph')
 const dashboardRef = ref<InstanceType<typeof DashboardView> | null>(null)
 const pendingAiImport = ref<{ preview: string; path: string } | null>(null)
 const copilotVisible = ref(false)
@@ -191,7 +190,7 @@ const noteEditorId = ref<number | null>(null)
 const noteEditorNotebookId = ref(0)
 const noteEditorProjectId = ref<number | null>(null)
 const noteEditorTitleSeed = ref('')
-const noteEditorVariant = ref<'split' | 'fullscreen'>('fullscreen')
+const noteEditorVariant = ref<'surface' | 'fullscreen'>('surface')
 const showMetadata = ref(false)
 const graphContainer = ref<HTMLDivElement | null>(null)
 const chatMessagesContainer = ref<HTMLDivElement | null>(null)
@@ -220,6 +219,7 @@ const currentContextNode = ref<Record<string, any> | null>(null)
 const hiddenNodeIds = ref<Set<number>>(new Set())
 const STORAGE_PATH_KEY = 'app_storage_path'
 let graphSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let graphResizeObserver: ResizeObserver | null = null
 
 const formatImportUiError = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
@@ -490,7 +490,8 @@ async function loadProjectUiFromDb(projectId: number): Promise<void> {
     currentTableFilter.value = d.workspace?.tableFilter?.trim() ? d.workspace.tableFilter : 'all'
     searchKeyword.value = d.workspace?.searchKeyword ?? ''
     const tab = d.workspace?.workspaceTab
-    workspaceTab.value = tab === 'raw' || tab === 'notes' || tab === 'dashboard' ? tab : 'dashboard'
+    workspaceTab.value =
+      tab === 'raw' || tab === 'notes' || tab === 'dashboard' || tab === 'graph' ? tab : 'dashboard'
     activeAiTopicId.value =
       typeof d.aiCurrentTopicId === 'number' && Number.isFinite(d.aiCurrentTopicId) ? d.aiCurrentTopicId : null
     chartConfigurationsState.value = d.chartConfigurations
@@ -946,9 +947,7 @@ function openNoteEditor(payload: {
   noteEditorNotebookId.value = payload.notebookId
   noteEditorProjectId.value = payload.projectId
   noteEditorTitleSeed.value = payload.title ?? ''
-  const useSplit =
-    shellMode.value === 'bookshelf' || (shellMode.value === 'project' && workspaceTab.value === 'notes')
-  noteEditorVariant.value = useSplit ? 'split' : 'fullscreen'
+  noteEditorVariant.value = 'surface'
   noteEditorOpen.value = true
 }
 
@@ -966,9 +965,7 @@ function onNoteEditorClosed(): void {
 }
 
 function onNoteEditorExitFullscreen(): void {
-  const canSplit =
-    shellMode.value === 'bookshelf' || (shellMode.value === 'project' && workspaceTab.value === 'notes')
-  noteEditorVariant.value = canSplit ? 'split' : 'fullscreen'
+  noteEditorVariant.value = 'surface'
 }
 
 async function createProjectNote(): Promise<void> {
@@ -1689,10 +1686,21 @@ const initGraph = async (nodes: GraphNode[], edges: GraphEdge[]): Promise<void> 
     if (!nativeEvent) return
     showContextMenu(nativeEvent, params.data as Record<string, any>)
   })
+  resizeGraph()
 }
 
 const resizeGraph = (): void => {
   graphInstance.value?.resize()
+}
+
+async function refreshProjectGraph(): Promise<void> {
+  try {
+    await loadGraphData(true)
+    await nextTick()
+    resizeGraph()
+  } catch (error) {
+    ElMessage.error(`图谱加载失败：${String(error)}`)
+  }
 }
 
 const openDetail = (data: Record<string, unknown>): void => {
@@ -2205,7 +2213,29 @@ watch(workspaceTab, async (tab) => {
     await nextTick()
     dashboardRef.value?.resizeChart()
   }
+  if (tab === 'graph' && shellMode.value === 'project') {
+    await nextTick()
+    await nextTick()
+    try {
+      await loadGraphData(true)
+    } catch (error) {
+      ElMessage.error(`图谱加载失败：${String(error)}`)
+    }
+    await nextTick()
+    resizeGraph()
+  }
   schedulePersistProjectUi()
+})
+
+watch(graphContainer, (el) => {
+  graphResizeObserver?.disconnect()
+  graphResizeObserver = null
+  if (!el || workspaceTab.value !== 'graph' || shellMode.value !== 'project') return
+  graphResizeObserver = new ResizeObserver(() => {
+    resizeGraph()
+  })
+  graphResizeObserver.observe(el)
+  requestAnimationFrame(() => resizeGraph())
 })
 
 watch(filteredGraphData, () => {
@@ -2262,6 +2292,8 @@ onBeforeUnmount(() => {
   if (currentProjectId.value != null) {
     void persistCurrentProjectUiState(currentProjectId.value)
   }
+  graphResizeObserver?.disconnect()
+  graphResizeObserver = null
   window.removeEventListener('resize', resizeGraph)
   graphInstance.value?.dispose()
   graphInstance.value = null
@@ -2429,18 +2461,11 @@ onUnmounted(() => {
       </div>
     </el-header>
 
-    <el-main
-      class="content-area"
-      :class="{
-        'content-area--bookshelf-split':
-          shellMode === 'bookshelf' && noteEditorOpen && noteEditorVariant === 'split'
-      }"
-    >
+    <el-main class="content-area">
       <div v-if="shellMode === 'bookshelf'" class="bookshelf-host">
         <BookshelfView
           ref="bookshelfRef"
           class="bookshelf-pane"
-          :class="{ 'bookshelf-pane--with-editor': noteEditorOpen && noteEditorVariant === 'split' }"
           @new-note="
             openNoteEditor({ id: null, notebookId: $event.notebookId, projectId: null, title: '' })
           "
@@ -2497,12 +2522,30 @@ onUnmounted(() => {
             </div>
           </div>
         </el-tab-pane>
+        <el-tab-pane label="知识图谱" name="graph" lazy>
+          <div class="graph-tab-pane-fill">
+            <div class="graph-pane-embedded graph-tab-root">
+            <div class="graph-pane-header">
+              <span class="graph-toolbar-title">项目内数据关联</span>
+              <div class="graph-actions">
+                <el-button size="small" :icon="Refresh" @click="refreshProjectGraph">刷新</el-button>
+              </div>
+            </div>
+            <div class="graph-pane-body">
+              <div ref="graphContainer" class="graph-canvas graph-canvas-embedded" />
+            </div>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
 
       <div
         v-if="noteEditorOpen"
         class="note-editor-host"
-        :class="{ 'note-editor-host--docked': noteEditorVariant === 'split' }"
+        :class="{
+          'note-editor-host--surface': noteEditorVariant === 'surface',
+          'note-editor-host--fs': noteEditorVariant === 'fullscreen'
+        }"
       >
         <NoteEditorShell
           v-model:visible="noteEditorOpen"
@@ -2512,7 +2555,7 @@ onUnmounted(() => {
           :initial-title="noteEditorTitleSeed"
           :variant="noteEditorVariant"
           :force-bookshelf-global="shellMode === 'bookshelf'"
-          :allow-exit-to-split="shellMode === 'bookshelf' || workspaceTab === 'notes'"
+          :allow-exit-to-surface="true"
           @saved="onNoteEditorSaved"
           @update:visible="(v) => !v && onNoteEditorClosed()"
           @request-fullscreen="noteEditorVariant = 'fullscreen'"
@@ -3100,25 +3143,6 @@ onUnmounted(() => {
   font-weight: 600;
   background: #eef2ff;
 }
-.content-area--bookshelf-split {
-  flex-direction: row;
-  align-items: stretch;
-}
-.content-area--bookshelf-split .bookshelf-host {
-  flex: 1;
-  min-width: 0;
-}
-.content-area--bookshelf-split .note-editor-host--docked {
-  position: relative !important;
-  top: auto !important;
-  right: auto !important;
-  bottom: auto !important;
-  flex: 1;
-  min-width: 0;
-  width: auto !important;
-  max-width: none !important;
-}
-
 .sidebar-global-linked {
   flex-shrink: 0;
   margin: 8px 10px 12px;
@@ -3162,22 +3186,23 @@ onUnmounted(() => {
   padding: 8px;
 }
 
-.bookshelf-pane--with-editor {
-  flex: 1;
+.note-editor-host {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
 }
 
-.note-editor-host {
-  flex-shrink: 0;
+.note-editor-host--surface {
+  background: rgba(15, 23, 42, 0.04);
 }
-.note-editor-host--docked {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(480px, 44vw);
-  z-index: 50;
-  min-width: 320px;
+
+.note-editor-host--fs {
+  pointer-events: none;
 }
 
 .import-choice-hint {
@@ -3268,7 +3293,10 @@ onUnmounted(() => {
 
 .workspace-main-tabs :deep(.el-tab-pane) {
   height: 100%;
+  min-height: 0;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .table-pane-inner {
@@ -3277,10 +3305,19 @@ onUnmounted(() => {
   background: #fff;
 }
 
+.graph-tab-pane-fill {
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
 .graph-pane-embedded {
   width: 100%;
-  height: calc(100vh - 56px - 42px);
-  min-height: 480px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   border: none;
@@ -3290,7 +3327,9 @@ onUnmounted(() => {
 
 .graph-canvas-embedded {
   flex: 1;
-  min-height: 400px;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .graph-pane-header {

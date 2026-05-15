@@ -216,7 +216,7 @@ export type ProjectUiStateV1 = {
   workspace: {
     tableFilter: string
     searchKeyword: string
-    workspaceTab?: 'dashboard' | 'raw' | 'notes'
+    workspaceTab?: 'dashboard' | 'raw' | 'notes' | 'graph'
   }
   aiCurrentTopicId: number | null
   /** 未写入过该字段的旧数据为 undefined，由前端按当前 dashboard 生成默认两张卡 */
@@ -380,6 +380,8 @@ const api = {
     ipcRenderer.invoke('db:items:create-note', title, contentText, tags, projectId, notebookId, Boolean(forceBookshelfGlobal)),
   clearItems: (projectId?: number): Promise<ActionResult> => ipcRenderer.invoke('db:items:clear', projectId),
   pickImportFile: (): Promise<PickImportFileResult> => ipcRenderer.invoke('db:items:pick-import-file'),
+  pickBookshelfDocumentFile: (): Promise<PickImportFileResult> =>
+    ipcRenderer.invoke('bookshelf:pick-document-file'),
   importFile: (filePath: string, title?: string, projectId?: number): Promise<ImportResult> =>
     ipcRenderer.invoke('db:items:import', filePath, title, projectId),
   importStructuredJson: (payload: {

@@ -36,10 +36,10 @@ const props = defineProps<{
   notebookId: number
   projectId: number | null
   initialTitle: string
-  /** split：主内容区右侧停靠；fullscreen：全屏覆盖 */
-  variant?: 'split' | 'fullscreen'
-  /** 全屏模式下是否显示「退回分屏」 */
-  allowExitToSplit?: boolean
+  /** surface：占据主内容区；fullscreen：全屏覆盖窗口 */
+  variant?: 'surface' | 'fullscreen'
+  /** 全屏模式下是否显示「退出全屏」 */
+  allowExitToSurface?: boolean
   /** 书柜新建/编辑：强制写入 project_id=NULL，避免误归入默认项目 */
   forceBookshelfGlobal?: boolean
 }>()
@@ -58,7 +58,7 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null
 const quillRef = ref<InstanceType<typeof QuillEditor> | null>(null)
 let detachImageResize: (() => void) | null = null
 
-const isSplit = (): boolean => props.variant === 'split'
+const isFullscreen = (): boolean => props.variant === 'fullscreen'
 
 const toolbarOptions = [
   [{ font: FONT_WHITELIST }],
@@ -443,7 +443,7 @@ onBeforeUnmount(() => {
   <div
     v-show="visible"
     class="note-editor-root"
-    :class="{ 'note-editor-root--split': isSplit(), 'note-editor-root--fs': !isSplit() }"
+    :class="{ 'note-editor-root--surface': !isFullscreen(), 'note-editor-root--fs': isFullscreen() }"
   >
     <div class="note-editor-chrome">
       <el-input
@@ -454,10 +454,10 @@ onBeforeUnmount(() => {
         clearable
       />
       <div class="note-editor-actions">
-        <el-tooltip v-if="isSplit()" content="全屏编辑" placement="bottom">
+        <el-tooltip v-if="!isFullscreen()" content="全屏编辑" placement="bottom">
           <el-button text circle :icon="FullScreen" @click="goFullscreen" />
         </el-tooltip>
-        <el-tooltip v-else-if="allowExitToSplit" content="退出全屏" placement="bottom">
+        <el-tooltip v-else-if="allowExitToSurface" content="退出全屏" placement="bottom">
           <el-button text circle :icon="FullScreen" @click="exitFullscreen" />
         </el-tooltip>
         <el-button type="primary" :loading="saving" :icon="DocumentChecked" @click="performSave">保存</el-button>
@@ -495,10 +495,10 @@ onBeforeUnmount(() => {
   background: rgba(15, 23, 42, 0.08);
 }
 
-.note-editor-root--split {
-  border-left: 1px solid #e2e8f0;
-  border-radius: 16px 0 0 16px;
-  box-shadow: -12px 0 40px rgba(15, 23, 42, 0.08);
+.note-editor-root--surface {
+  border-radius: 0;
+  box-shadow: none;
+  border: none;
   background: #fffef9;
 }
 
@@ -513,8 +513,8 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 
-.note-editor-root--split .note-editor-chrome {
-  border-radius: 16px 0 0 0;
+.note-editor-root--surface .note-editor-chrome {
+  border-radius: 0;
 }
 
 .note-editor-title {

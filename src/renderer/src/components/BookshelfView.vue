@@ -490,7 +490,7 @@ async function importDocument(): Promise<void> {
     ElMessage.warning('请先新建或选择一个文件夹')
     return
   }
-  const picked = await window.api.pickImportFile()
+  const picked = await window.api.pickBookshelfDocumentFile()
   if (!picked.success || !picked.filePath) {
     if (picked.message) ElMessage.info(picked.message)
     return

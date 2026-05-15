@@ -21,6 +21,7 @@ const emit = defineEmits<{
 
 const host = ref<HTMLDivElement | null>(null)
 const inst = shallowRef<echarts.ECharts | null>(null)
+let hostResizeObserver: ResizeObserver | null = null
 const nodes = ref<GraphNode[]>([])
 const edges = ref<GraphEdge[]>([])
 
@@ -139,6 +140,7 @@ async function paint(): Promise<void> {
       .map((d) => ({ id: Number(d.id), x: d.x!, y: d.y! }))
     if (positions.length) emit('layout-save', positions)
   })
+  chart.resize()
 }
 
 function resize(): void {
@@ -156,11 +158,21 @@ watch(
 watch(
   () => host.value,
   (el) => {
-    if (el) void refresh()
+    hostResizeObserver?.disconnect()
+    hostResizeObserver = null
+    if (el) {
+      hostResizeObserver = new ResizeObserver(() => {
+        resize()
+      })
+      hostResizeObserver.observe(el)
+      void refresh()
+    }
   }
 )
 
 onBeforeUnmount(() => {
+  hostResizeObserver?.disconnect()
+  hostResizeObserver = null
   inst.value?.dispose()
   inst.value = null
 })

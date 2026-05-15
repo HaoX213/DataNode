@@ -810,6 +810,28 @@ app.whenReady().then(() => {
 
     return { success: true, filePath: picked.filePaths[0] }
   })
+  ipcMain.handle('bookshelf:pick-document-file', async () => {
+    const focusedWindow = BrowserWindow.getFocusedWindow()
+    const options: OpenDialogOptions = {
+      title: '导入文档到书柜（PDF / Word / 图片等）',
+      properties: ['openFile'],
+      filters: [
+        {
+          name: '文档',
+          extensions: ['pdf', 'docx', 'doc', 'txt', 'md', 'html', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']
+        },
+        { name: '表格（亦可导入书柜）', extensions: ['xlsx', 'xls', 'csv', 'json'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    }
+    const picked = focusedWindow
+      ? await dialog.showOpenDialog(focusedWindow, options)
+      : await dialog.showOpenDialog(options)
+    if (picked.canceled || picked.filePaths.length === 0) {
+      return { success: false, message: '已取消' }
+    }
+    return { success: true, filePath: picked.filePaths[0] }
+  })
   ipcMain.handle('db:items:import', async (_, filePath: string, title = '', projectId?: number) => {
     if (!filePath) {
       return { success: false, message: '未选择文件', inserted: 0 }
