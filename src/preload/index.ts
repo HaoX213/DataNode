@@ -374,9 +374,10 @@ const api = {
     contentText: string,
     tags: string[],
     projectId?: number | null,
-    notebookId?: number
+    notebookId?: number,
+    forceBookshelfGlobal?: boolean
   ): Promise<ActionResult> =>
-    ipcRenderer.invoke('db:items:create-note', title, contentText, tags, projectId, notebookId),
+    ipcRenderer.invoke('db:items:create-note', title, contentText, tags, projectId, notebookId, Boolean(forceBookshelfGlobal)),
   clearItems: (projectId?: number): Promise<ActionResult> => ipcRenderer.invoke('db:items:clear', projectId),
   pickImportFile: (): Promise<PickImportFileResult> => ipcRenderer.invoke('db:items:pick-import-file'),
   importFile: (filePath: string, title?: string, projectId?: number): Promise<ImportResult> =>

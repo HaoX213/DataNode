@@ -619,7 +619,9 @@ app.whenReady().then(() => {
       contentText: string,
       tags: string[] = [],
       projectId?: number | null,
-      notebookId?: number
+      notebookId?: number,
+      /** 为 true 时强制写入书柜（project_id 必须为 NULL），防止 IPC 参数丢失导致落入默认项目 */
+      forceBookshelfGlobal?: boolean
     ) => {
       try {
         let text = (contentText ?? '').trim()
@@ -634,8 +636,9 @@ app.whenReady().then(() => {
           notebookId != null && Number.isFinite(Number(notebookId)) && Number(notebookId) > 0
             ? Number(notebookId)
             : getDefaultNotebookId()
-        const pid =
-          projectId === null
+        const pid = forceBookshelfGlobal
+          ? null
+          : projectId === null
             ? null
             : projectId !== undefined && Number.isFinite(Number(projectId)) && Number(projectId) > 0
               ? Number(projectId)

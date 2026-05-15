@@ -928,16 +928,22 @@ export function renameBookshelfItem(itemId: number, nextTitle: string): void {
     .run({ id: itemId, title: t, content_json: contentJson })
 }
 
+/** 列出某文件夹及其所有子文件夹内的书柜全局条目（project_id IS NULL），便于父级视图看到子目录中的笔记 */
 export function listBookshelfItems(notebookId: number): ItemRow[] {
   const database = getDb()
   return database
     .prepare(
       `
-      SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at
-      FROM items
-      WHERE notebook_id = @notebookId AND project_id IS NULL
-      ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
-      LIMIT 1000
+      WITH RECURSIVE sub(id) AS (
+        SELECT @notebookId AS id
+        UNION ALL
+        SELECT n.id FROM notebooks n INNER JOIN sub s ON n.parent_id = s.id
+      )
+      SELECT i.id, i.notebook_id, i.project_id, i.type, i.title, i.content_text, i.content_json, i.source_file_path, i.created_at, i.updated_at
+      FROM items i
+      WHERE i.project_id IS NULL AND i.notebook_id IN (SELECT id FROM sub)
+      ORDER BY datetime(COALESCE(i.updated_at, i.created_at)) DESC, i.id DESC
+      LIMIT 2000
     `
     )
     .all({ notebookId }) as ItemRow[]

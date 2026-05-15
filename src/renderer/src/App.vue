@@ -7,7 +7,7 @@ import RawDataView from './components/RawDataView.vue'
 import BookshelfView from './components/BookshelfView.vue'
 import NoteEditorShell from './components/NoteEditorShell.vue'
 import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
-import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, Link, MagicStick, MoreFilled, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
+import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, MagicStick, MoreFilled, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
 
 type ItemRow = {
   id: number
@@ -152,8 +152,6 @@ const aiTopics = ref<AiTopicRow[]>([])
 const activeAiTopicId = ref<number | null>(null)
 const activeGlobalAiTopicId = ref<number | null>(null)
 const globalLinkedProjectIds = ref<number[]>([])
-const globalLinkedDraftIds = ref<number[]>([])
-const globalLinkedFlyoutOpen = ref(false)
 const projectNotesList = ref<ItemRow[]>([])
 const importChoiceDialogVisible = ref(false)
 const bookshelfPickForImportVisible = ref(false)
@@ -422,21 +420,6 @@ const copilotModeBadge = computed(() => {
   }
   return `项目 AI · ${currentProject.value?.name ?? '—'}`
 })
-
-function openGlobalLinkedFlyout(): void {
-  if (globalLinkedFlyoutOpen.value) {
-    globalLinkedFlyoutOpen.value = false
-    return
-  }
-  globalLinkedDraftIds.value = [...globalLinkedProjectIds.value]
-  globalLinkedFlyoutOpen.value = true
-}
-
-function confirmGlobalLinkedProjects(): void {
-  globalLinkedProjectIds.value = [...globalLinkedDraftIds.value]
-  onGlobalLinkedProjectsChange()
-  globalLinkedFlyoutOpen.value = false
-}
 
 async function loadGlobalLinkedProjectsFromDb(): Promise<void> {
   const r = await window.api.getGlobalAiLinkedProjectIds()
@@ -2010,10 +1993,13 @@ function openProjectCopilot(): void {
   copilotVisible.value = true
 }
 
-function openGlobalCopilot(): void {
+function toggleGlobalCopilot(): void {
+  if (copilotVisible.value && copilotMode.value === 'global') {
+    copilotVisible.value = false
+    return
+  }
   copilotMode.value = 'global'
   copilotTopicsCollapsed.value = false
-  globalLinkedFlyoutOpen.value = false
   copilotVisible.value = true
 }
 
@@ -2021,7 +2007,6 @@ watch(copilotVisible, async (v) => {
   if (!v) {
     disposeCopilotCharts()
     pendingAiImport.value = null
-    globalLinkedFlyoutOpen.value = false
     if (currentProjectId.value != null) {
       await persistCurrentProjectUiState(currentProjectId.value)
     }
@@ -2297,7 +2282,7 @@ onUnmounted(() => {
 
       <el-button
         class="bookshelf-sidebar-btn"
-        :class="{ 'is-collapsed': sidebarCollapsed }"
+        :class="{ 'is-collapsed': sidebarCollapsed, active: shellMode === 'bookshelf' }"
         :icon="Reading"
         @click="openBookshelfShell"
       >
@@ -2319,7 +2304,10 @@ onUnmounted(() => {
           v-for="project in projects"
           :key="project.id"
           class="project-item"
-          :class="{ active: project.id === currentProjectId, collapsed: sidebarCollapsed }"
+          :class="{
+            active: shellMode === 'project' && project.id === currentProjectId,
+            collapsed: sidebarCollapsed
+          }"
           @click="switchProject(project.id)"
         >
           <span class="project-avatar">{{ project.name.slice(0, 1).toUpperCase() }}</span>
@@ -2333,6 +2321,25 @@ onUnmounted(() => {
             </template>
           </el-dropdown>
         </button>
+      </div>
+
+      <div
+        v-if="!sidebarCollapsed && copilotVisible && copilotMode === 'global'"
+        class="sidebar-global-linked"
+      >
+        <div class="sidebar-global-linked-title">全局 AI · 关联项目</div>
+        <p class="sidebar-global-linked-hint">勾选需参与数据合并的项目</p>
+        <el-scrollbar max-height="220px">
+          <el-checkbox-group
+            v-model="globalLinkedProjectIds"
+            class="sidebar-global-linked-checks"
+            @change="onGlobalLinkedProjectsChange"
+          >
+            <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="sidebar-global-linked-cb">
+              {{ p.name }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-scrollbar>
       </div>
     </el-aside>
 
@@ -2373,7 +2380,7 @@ onUnmounted(() => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-button text class="menu-button" @click="openGlobalCopilot">全局 AI</el-button>
+          <el-button text class="menu-button" @click="toggleGlobalCopilot">全局 AI</el-button>
           <el-button text class="menu-button" @click="openSettingsDialog">⚙️ 设置</el-button>
         </div>
       </div>
@@ -2422,7 +2429,13 @@ onUnmounted(() => {
       </div>
     </el-header>
 
-    <el-main class="content-area">
+    <el-main
+      class="content-area"
+      :class="{
+        'content-area--bookshelf-split':
+          shellMode === 'bookshelf' && noteEditorOpen && noteEditorVariant === 'split'
+      }"
+    >
       <div v-if="shellMode === 'bookshelf'" class="bookshelf-host">
         <BookshelfView
           ref="bookshelfRef"
@@ -2498,6 +2511,7 @@ onUnmounted(() => {
           :project-id="noteEditorProjectId"
           :initial-title="noteEditorTitleSeed"
           :variant="noteEditorVariant"
+          :force-bookshelf-global="shellMode === 'bookshelf'"
           :allow-exit-to-split="shellMode === 'bookshelf' || workspaceTab === 'notes'"
           @saved="onNoteEditorSaved"
           @update:visible="(v) => !v && onNoteEditorClosed()"
@@ -2568,7 +2582,7 @@ onUnmounted(() => {
                 {{ copilotModeBadge }}
               </el-tag>
             </div>
-            <div class="copilot-subtitle">项目 AI 按项目隔离分支；全局 AI 独立存储。侧栏可收起，主界面左侧项目栏保持可见。</div>
+            <div class="copilot-subtitle">项目 AI 按项目隔离分支；全局 AI 独立存储。关联项目请在左侧栏勾选。</div>
           </div>
           <div class="copilot-sheet-actions">
             <el-tooltip :content="copilotMaximized ? '恢复高度' : '最大化显示'" placement="bottom">
@@ -2588,23 +2602,6 @@ onUnmounted(() => {
         </div>
         <div class="copilot-sheet-body">
           <aside v-if="!copilotTopicsCollapsed" class="copilot-topic-rail">
-            <template v-if="copilotMode === 'global'">
-              <div class="global-ai-rail-tools">
-                <el-tooltip content="关联项目（侧栏勾选）" placement="right">
-                  <el-button
-                    class="global-link-circle-btn"
-                    circle
-                    type="primary"
-                    plain
-                    :icon="Link"
-                    @click="openGlobalLinkedFlyout"
-                  />
-                </el-tooltip>
-                <span v-if="globalLinkedProjectIds.length" class="global-linked-pill">
-                  已选 {{ globalLinkedProjectIds.length }} 个项目
-                </span>
-              </div>
-            </template>
             <div class="copilot-topic-head-row">
               <span>{{ copilotMode === 'global' ? '对话分支' : copilotRailTitle }}</span>
               <el-tooltip content="收起分支栏" placement="left">
@@ -2649,24 +2646,6 @@ onUnmounted(() => {
               <el-button circle :icon="Expand" @click="copilotTopicsCollapsed = false" />
             </el-tooltip>
           </div>
-          <aside v-if="copilotMode === 'global' && globalLinkedFlyoutOpen" class="global-linked-flyout">
-            <div class="global-linked-flyout-header">
-              <span class="global-linked-flyout-title">关联项目</span>
-              <el-button text circle size="small" :icon="Close" @click="globalLinkedFlyoutOpen = false" />
-            </div>
-            <p class="global-linked-flyout-hint">勾选需参与统计合并的项目，确认后生效。本面板贴近对话区左侧，不遮挡分支列表。</p>
-            <el-scrollbar class="global-linked-flyout-scroll" max-height="320px">
-              <el-checkbox-group v-model="globalLinkedDraftIds" class="global-linked-flyout-checks">
-                <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-linked-flyout-cb">
-                  {{ p.name }}
-                </el-checkbox>
-              </el-checkbox-group>
-            </el-scrollbar>
-            <div class="global-linked-flyout-footer">
-              <el-button size="small" round @click="globalLinkedFlyoutOpen = false">取消</el-button>
-              <el-button size="small" round type="primary" @click="confirmGlobalLinkedProjects">确认</el-button>
-            </div>
-          </aside>
           <div class="copilot-chat-col">
             <div ref="chatMessagesContainer" class="copilot-messages copilot-messages-embed">
               <div
@@ -3121,8 +3100,60 @@ onUnmounted(() => {
   font-weight: 600;
   background: #eef2ff;
 }
-.bookshelf-sidebar-btn:hover {
+.content-area--bookshelf-split {
+  flex-direction: row;
+  align-items: stretch;
+}
+.content-area--bookshelf-split .bookshelf-host {
+  flex: 1;
+  min-width: 0;
+}
+.content-area--bookshelf-split .note-editor-host--docked {
+  position: relative !important;
+  top: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  flex: 1;
+  min-width: 0;
+  width: auto !important;
+  max-width: none !important;
+}
+
+.sidebar-global-linked {
+  flex-shrink: 0;
+  margin: 8px 10px 12px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+.sidebar-global-linked-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+}
+.sidebar-global-linked-hint {
+  margin: 6px 0 8px;
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+.sidebar-global-linked-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sidebar-global-linked-cb {
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  align-items: flex-start;
+}
+
+.bookshelf-sidebar-btn.active {
+  border-style: solid;
   border-color: #6366f1;
+  background: #e0e7ff;
   color: #312e81;
 }
 .bookshelf-sidebar-btn.is-collapsed {
@@ -3179,77 +3210,6 @@ onUnmounted(() => {
   font-size: 12px;
   color: #94a3b8;
   word-break: break-all;
-}
-.global-ai-rail-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid #eef2f7;
-}
-.global-link-circle-btn {
-  flex-shrink: 0;
-}
-.global-linked-pill {
-  font-size: 11px;
-  color: #64748b;
-  line-height: 1.3;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-.global-linked-flyout {
-  width: 272px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: linear-gradient(180deg, #fafbff 0%, #f4f6fb 100%);
-  border-right: 1px solid #e5e7eb;
-  border-radius: 0 18px 18px 0;
-  box-shadow: 4px 0 24px rgba(15, 23, 42, 0.06);
-  padding: 12px 12px 10px;
-}
-.global-linked-flyout-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-.global-linked-flyout-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: #111827;
-  letter-spacing: 0.01em;
-}
-.global-linked-flyout-hint {
-  font-size: 12px;
-  color: #64748b;
-  line-height: 1.45;
-  margin: 0 0 10px;
-}
-.global-linked-flyout-checks {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.global-linked-flyout-cb {
-  margin-right: 0;
-  border-radius: 10px;
-  padding: 4px 6px;
-  width: 100%;
-}
-.global-linked-flyout-footer {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid #e5e7eb;
-}
-.global-linked-flyout-scroll {
-  margin-bottom: 4px;
 }
 .project-notes-pane {
   padding: 16px;

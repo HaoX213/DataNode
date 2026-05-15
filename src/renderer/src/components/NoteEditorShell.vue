@@ -40,6 +40,8 @@ const props = defineProps<{
   variant?: 'split' | 'fullscreen'
   /** 全屏模式下是否显示「退回分屏」 */
   allowExitToSplit?: boolean
+  /** 书柜新建/编辑：强制写入 project_id=NULL，避免误归入默认项目 */
+  forceBookshelfGlobal?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -80,36 +82,221 @@ function stripEmpty(htmlContent: string): string {
   return t.length ? htmlContent : ''
 }
 
-function attachQuillImageCornerResize(quill: InstanceType<typeof Quill> | null): void {
+function attachQuillImageTransform(quill: InstanceType<typeof Quill> | null): void {
   detachImageResize?.()
   detachImageResize = null
   if (!quill) return
   const editor = quill.container?.querySelector?.('.ql-editor') as HTMLElement | null
-  if (!editor) return
+  const scrollHost = quill.container as HTMLElement | null
+  if (!editor || !scrollHost) return
 
-  const onDown = (e: MouseEvent) => {
-    const t = e.target
-    if (!(t instanceof HTMLImageElement)) return
-    const r = t.getBoundingClientRect()
-    const edge = 18
-    if (e.clientX < r.right - edge || e.clientY < r.bottom - edge) return
-    e.preventDefault()
-    const startX = e.clientX
-    const startW = t.width || t.offsetWidth || 120
-    const onMove = (ev: MouseEvent) => {
-      const w = Math.max(48, Math.round(startW + (ev.clientX - startX)))
-      t.style.width = `${w}px`
-      t.style.height = 'auto'
+  let selected: HTMLImageElement | null = null
+  let overlay: HTMLDivElement | null = null
+
+  function removeOverlay(): void {
+    overlay?.remove()
+    overlay = null
+  }
+
+  function clearSelection(): void {
+    selected?.classList.remove('dn-quill-img-selected')
+    selected = null
+    removeOverlay()
+  }
+
+  function readRotate(img: HTMLImageElement): number {
+    const m = /rotate\((-?[\d.]+)deg\)/.exec(img.style.transform || '')
+    return m ? Number(m[1]) || 0 : 0
+  }
+
+  function syncOverlay(): void {
+    if (!selected || !overlay) return
+    const r = selected.getBoundingClientRect()
+    const pad = 4
+    Object.assign(overlay.style, {
+      left: `${r.left - pad}px`,
+      top: `${r.top - pad}px`,
+      width: `${r.width + pad * 2}px`,
+      height: `${r.height + pad * 2}px`
+    })
+  }
+
+  function mountOverlay(): void {
+    if (!selected) return
+    removeOverlay()
+    overlay = document.createElement('div')
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      zIndex: '10050',
+      pointerEvents: 'none',
+      border: '2px solid #2563eb',
+      borderRadius: '4px',
+      boxSizing: 'border-box',
+      boxShadow: '0 0 0 1px rgba(255,255,255,.85)'
+    })
+    const corners: Array<{ k: string; cur: string; style: Partial<CSSStyleDeclaration> }> = [
+      { k: 'nw', cur: 'nwse-resize', style: { left: '-5px', top: '-5px' } },
+      { k: 'n', cur: 'ns-resize', style: { left: 'calc(50% - 5px)', top: '-5px' } },
+      { k: 'ne', cur: 'nesw-resize', style: { left: 'calc(100% - 5px)', top: '-5px' } },
+      { k: 'e', cur: 'ew-resize', style: { left: 'calc(100% - 5px)', top: 'calc(50% - 5px)' } },
+      { k: 'se', cur: 'nwse-resize', style: { left: 'calc(100% - 5px)', top: 'calc(100% - 5px)' } },
+      { k: 's', cur: 'ns-resize', style: { left: 'calc(50% - 5px)', top: 'calc(100% - 5px)' } },
+      { k: 'sw', cur: 'nesw-resize', style: { left: '-5px', top: 'calc(100% - 5px)' } },
+      { k: 'w', cur: 'ew-resize', style: { left: '-5px', top: 'calc(50% - 5px)' } }
+    ]
+    for (const { k, cur, style: st } of corners) {
+      const h = document.createElement('div')
+      h.dataset.corner = k
+      Object.assign(h.style, {
+        position: 'absolute',
+        width: '10px',
+        height: '10px',
+        background: '#fff',
+        border: '1px solid #2563eb',
+        borderRadius: '50%',
+        pointerEvents: 'auto',
+        cursor: cur,
+        boxSizing: 'border-box',
+        ...st
+      })
+      h.addEventListener('mousedown', (ev) => {
+        ev.preventDefault()
+        ev.stopPropagation()
+        if (!selected) return
+        const img = selected
+        const corner = k
+        const startMx = ev.clientX
+        const startMy = ev.clientY
+        const startW = img.offsetWidth
+        const startH = img.offsetHeight || img.offsetWidth
+        const onMove = (e: MouseEvent): void => {
+          const dx = e.clientX - startMx
+          const dy = e.clientY - startMy
+          let w = startW
+          let h = startH
+          if (corner.includes('e')) w = Math.max(32, startW + dx)
+          if (corner.includes('w')) w = Math.max(32, startW - dx)
+          if (corner.includes('s')) h = Math.max(32, startH + dy)
+          if (corner.includes('n')) h = Math.max(32, startH - dy)
+          img.style.width = `${Math.round(w)}px`
+          img.style.height = `${Math.round(h)}px`
+          syncOverlay()
+        }
+        const onUp = (): void => {
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+        }
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+      })
+      overlay!.appendChild(h)
     }
-    const onUp = () => {
+    const rot = document.createElement('div')
+    Object.assign(rot.style, {
+      position: 'absolute',
+      left: 'calc(50% - 9px)',
+      top: '-28px',
+      width: '18px',
+      height: '18px',
+      borderRadius: '50%',
+      background: '#fff',
+      border: '1px solid #2563eb',
+      pointerEvents: 'auto',
+      cursor: 'alias',
+      boxSizing: 'border-box',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: '12px',
+      color: '#2563eb',
+      lineHeight: 1
+    })
+    rot.textContent = '↻'
+    rot.title = '拖动旋转'
+    rot.addEventListener('mousedown', (ev) => {
+      ev.preventDefault()
+      ev.stopPropagation()
+      if (!selected) return
+      const img = selected
+      const base = readRotate(img)
+      const r = img.getBoundingClientRect()
+      const cx = r.left + r.width / 2
+      const cy = r.top + r.height / 2
+      const a0 = (Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI
+      const onMove = (e: MouseEvent): void => {
+        const a = (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI
+        const deg = base + (a - a0)
+        img.style.transform = `rotate(${deg}deg)`
+        syncOverlay()
+      }
+      const onUp = (): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+      }
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    })
+    overlay.appendChild(rot)
+    document.body.appendChild(overlay)
+    syncOverlay()
+  }
+
+  function selectImg(img: HTMLImageElement): void {
+    clearSelection()
+    selected = img
+    img.classList.add('dn-quill-img-selected')
+    mountOverlay()
+  }
+
+  const onEditorMouseDown = (e: MouseEvent): void => {
+    if (!(e.target instanceof HTMLImageElement) || !editor.contains(e.target)) return
+    e.stopPropagation()
+    const img = e.target
+    const wasOther = selected !== img
+    if (wasOther) {
+      selectImg(img)
+      return
+    }
+    const startX = e.clientX
+    const startY = e.clientY
+    const m0l = Number.parseFloat(img.style.marginLeft || '') || 0
+    const m0t = Number.parseFloat(img.style.marginTop || '') || 0
+    const onMove = (ev: MouseEvent): void => {
+      if (ev.clientX === startX && ev.clientY === startY) return
+      img.style.verticalAlign = 'top'
+      img.style.marginLeft = `${Math.round(m0l + (ev.clientX - startX))}px`
+      img.style.marginTop = `${Math.round(m0t + (ev.clientY - startY))}px`
+      syncOverlay()
+    }
+    const onUp = (): void => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
   }
-  editor.addEventListener('mousedown', onDown)
-  detachImageResize = () => editor.removeEventListener('mousedown', onDown)
+
+  const onDocMouseDown = (e: MouseEvent): void => {
+    const t = e.target
+    if (t instanceof Node && overlay?.contains(t)) return
+    if (t instanceof HTMLImageElement && editor.contains(t)) return
+    clearSelection()
+  }
+
+  const onScroll = (): void => {
+    syncOverlay()
+  }
+
+  editor.addEventListener('mousedown', onEditorMouseDown)
+  document.addEventListener('mousedown', onDocMouseDown)
+  scrollHost.addEventListener('scroll', onScroll)
+
+  detachImageResize = (): void => {
+    editor.removeEventListener('mousedown', onEditorMouseDown)
+    document.removeEventListener('mousedown', onDocMouseDown)
+    scrollHost.removeEventListener('scroll', onScroll)
+    clearSelection()
+  }
 }
 
 async function loadNote(): Promise<void> {
@@ -154,7 +341,8 @@ async function performSave(): Promise<void> {
         html.value,
         [],
         props.projectId,
-        props.notebookId
+        props.notebookId,
+        Boolean(props.forceBookshelfGlobal)
       )
       if (!r.success || !r.data || typeof (r.data as { id?: number }).id !== 'number') {
         ElMessage.warning((r as { message?: string }).message || '保存失败')
@@ -218,7 +406,7 @@ watch(
       if (q) {
         const toolbar = q.getModule('toolbar') as { addHandler?: (name: string, fn: () => void) => void }
         toolbar?.addHandler?.('image', onAddImageClick)
-        attachQuillImageCornerResize(q)
+        attachQuillImageTransform(q)
       }
     } else {
       detachImageResize?.()
@@ -241,7 +429,7 @@ watch(
 onMounted(() => {
   void nextTick(() => {
     const q = quillRef.value?.getQuill()
-    if (q && props.visible) attachQuillImageCornerResize(q)
+    if (q && props.visible) attachQuillImageTransform(q)
   })
 })
 
@@ -277,7 +465,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <div class="note-editor-paper">
-      <div class="note-img-resize-hint">图片右下角拖拽可调整宽度</div>
+      <div class="note-img-resize-hint">图片：单击可选中；拖边角缩放、上方 ↻ 旋转、拖拽图片移动位置</div>
       <QuillEditor
         ref="quillRef"
         v-model:content="html"
@@ -387,6 +575,10 @@ onBeforeUnmount(() => {
 .note-quill :deep(.ql-editor img) {
   max-width: 100%;
   height: auto;
-  cursor: nwse-resize;
+  cursor: grab;
+}
+.note-quill :deep(.ql-editor img.dn-quill-img-selected) {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
 }
 </style>
