@@ -7,7 +7,7 @@ import RawDataView from './components/RawDataView.vue'
 import BookshelfView from './components/BookshelfView.vue'
 import NoteEditorShell from './components/NoteEditorShell.vue'
 import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
-import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, MagicStick, MoreFilled, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
+import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Hide, MagicStick, MoreFilled, Picture, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
 
 type ItemRow = {
   id: number
@@ -152,6 +152,11 @@ const activeAiTopicId = ref<number | null>(null)
 const activeGlobalAiTopicId = ref<number | null>(null)
 const globalLinkedProjectIds = ref<number[]>([])
 const projectNotesList = ref<ItemRow[]>([])
+const projectRefList = ref<ItemRow[]>([])
+const projectDocSubTab = ref<'notes' | 'refs'>('notes')
+const projectImportFromBookshelfVisible = ref(false)
+const bookshelfImportList = ref<ItemRow[]>([])
+const bookshelfSelectedForProject = ref<ItemRow[]>([])
 const importChoiceDialogVisible = ref(false)
 const bookshelfPickForImportVisible = ref(false)
 const bookshelfImportCandidates = ref<ItemRow[]>([])
@@ -847,7 +852,7 @@ const switchProject = async (projectId: number): Promise<void> => {
   selectedContextNode.value = null
   detailDrawerVisible.value = false
   isFocusMode.value = false
-  await Promise.all([runSearch(), loadProjectNotes(), loadAllTags()])
+  await Promise.all([runSearch(), loadProjectDocuments(), loadAllTags()])
   coerceTableFilterForAvailableTypes()
   if (copilotVisible.value && copilotMode.value === 'project') {
     await loadAiTopicsForProject()
@@ -907,7 +912,11 @@ const removeProject = async (projectId: number): Promise<void> => {
 const refreshItems = async (): Promise<void> => {
   loading.value = true
   try {
-    const result = await window.api.listItems(currentProjectId.value ?? undefined)
+    if (shellMode.value !== 'project' || currentProjectId.value == null) {
+      applyRows([])
+      return
+    }
+    const result = await window.api.listItems(currentProjectId.value)
     applyRows(result)
   } finally {
     loading.value = false
@@ -917,7 +926,11 @@ const refreshItems = async (): Promise<void> => {
 const runSearch = async (): Promise<void> => {
   searching.value = true
   try {
-    const result = await window.api.listItems(currentProjectId.value ?? undefined)
+    if (shellMode.value !== 'project' || currentProjectId.value == null) {
+      applyRows([])
+      return
+    }
+    const result = await window.api.listItems(currentProjectId.value)
     applyRows(result)
   } finally {
     searching.value = false
@@ -926,15 +939,25 @@ const runSearch = async (): Promise<void> => {
 
 function openBookshelfShell(): void {
   shellMode.value = 'bookshelf'
+  projectNotesList.value = []
+  projectRefList.value = []
+  applyRows([])
 }
 
-async function loadProjectNotes(): Promise<void> {
-  if (currentProjectId.value == null) {
+async function loadProjectDocuments(): Promise<void> {
+  if (shellMode.value !== 'project' || currentProjectId.value == null) {
     projectNotesList.value = []
+    projectRefList.value = []
     return
   }
-  const r = await window.api.listProjectNotes(currentProjectId.value)
-  projectNotesList.value = r.success ? r.data ?? [] : []
+  const r = await window.api.listProjectDocuments(currentProjectId.value)
+  if (!r.success || !r.data) {
+    projectNotesList.value = []
+    projectRefList.value = []
+    return
+  }
+  projectNotesList.value = r.data.notes ?? []
+  projectRefList.value = r.data.references ?? []
 }
 
 function openNoteEditor(payload: {
@@ -956,7 +979,7 @@ async function onNoteEditorSaved(payload: { id: number; isNew: boolean }): Promi
     noteEditorId.value = payload.id
   }
   await runSearch()
-  await loadProjectNotes()
+  await loadProjectDocuments()
   await bookshelfRef.value?.refreshLibrary?.()
 }
 
@@ -988,7 +1011,11 @@ async function openProjectNote(id: number): Promise<void> {
 }
 
 async function runProjectFileImport(filePath: string, title: string): Promise<void> {
-  const result = await window.api.importFile(filePath, title, currentProjectId.value ?? undefined)
+  if (currentProjectId.value == null) {
+    ElMessage.warning('请先进入项目后再导入文件')
+    return
+  }
+  const result = await window.api.importFile(filePath, title, currentProjectId.value)
 
   if (result.mode === 'ai_text') {
     pendingAiImport.value = {
@@ -1019,6 +1046,91 @@ async function runProjectFileImport(filePath: string, title: string): Promise<vo
       { confirmButtonText: '好的' }
     )
   }
+  await runSearch()
+  await loadProjectDocuments()
+}
+
+function parseItemDocKind(it: ItemRow): string {
+  try {
+    const o = JSON.parse(it.content_json || '{}') as { dnDocKind?: string }
+    if (typeof o.dnDocKind === 'string' && o.dnDocKind.trim()) return o.dnDocKind.trim()
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
+
+function refKindLabel(it: ItemRow): string {
+  const k = parseItemDocKind(it)
+  if (k === 'pdf') return 'PDF'
+  if (k === 'word') return 'Word'
+  if (k === 'image') return '图片'
+  if (k === 'other') return '文档'
+  if (it.type === 'document') return '文档'
+  return '文件'
+}
+
+function refCardIcon(it: ItemRow): typeof Document {
+  return parseItemDocKind(it) === 'image' ? Picture : Document
+}
+
+async function openProjectReference(it: ItemRow): Promise<void> {
+  const p = it.source_file_path?.trim()
+  if (!p) {
+    ElMessage.warning('没有可打开的文件路径')
+    return
+  }
+  const r = await window.api.openPathWithShell(p)
+  if (!r.success) ElMessage.warning(r.message || '打开失败')
+}
+
+async function onProjectImportCommand(cmd: 'local' | 'bookshelf'): Promise<void> {
+  if (currentProjectId.value == null) {
+    ElMessage.warning('请先选择并进入项目')
+    return
+  }
+  if (cmd === 'local') {
+    const picked = await window.api.pickProjectDocumentFile()
+    if (!picked.success || !picked.filePath) {
+      if (picked.message) ElMessage.info(picked.message)
+      return
+    }
+    const base = picked.filePath.replace(/\\/g, '/').split('/').pop() || '导入文件'
+    const title = base.replace(/\.[^.]+$/, '') || base
+    await runProjectFileImport(picked.filePath, title)
+    return
+  }
+  const r = await window.api.listAllBookshelfGlobalItems()
+  if (!r.success) {
+    ElMessage.warning('无法加载书柜条目')
+    return
+  }
+  bookshelfImportList.value = (r.data ?? []).filter(
+    (row) => row.type === 'note' || row.type === 'file' || row.type === 'document'
+  )
+  bookshelfSelectedForProject.value = []
+  projectImportFromBookshelfVisible.value = true
+}
+
+function onBookshelfPickSelectionChange(rows: ItemRow[]): void {
+  bookshelfSelectedForProject.value = rows
+}
+
+async function confirmImportFromBookshelf(): Promise<void> {
+  if (currentProjectId.value == null) return
+  const ids = bookshelfSelectedForProject.value.map((x) => x.id)
+  if (!ids.length) {
+    ElMessage.warning('请先勾选书柜中的笔记或文档')
+    return
+  }
+  const r = await window.api.copyBookshelfItemsToProject(ids, currentProjectId.value)
+  if (!r.success) {
+    ElMessage.error(r.message || '引入失败')
+    return
+  }
+  ElMessage.success(r.message || '已引入到当前项目')
+  projectImportFromBookshelfVisible.value = false
+  await loadProjectDocuments()
   await runSearch()
 }
 
@@ -1162,7 +1274,7 @@ const loadInitialData = async (): Promise<void> => {
   await refreshItems()
   coerceTableFilterForAvailableTypes()
   await loadAllTags()
-  await loadProjectNotes()
+  await loadProjectDocuments()
 }
 
 const initializeStorageAndLoadApp = async (selectedPath: string): Promise<boolean> => {
@@ -2500,26 +2612,61 @@ onUnmounted(() => {
             />
           </div>
         </el-tab-pane>
-        <el-tab-pane label="项目笔记" name="notes">
-          <div class="project-notes-pane">
+        <el-tab-pane label="项目文档 (Project Documents)" name="notes">
+          <div class="project-notes-pane project-documents-pane">
             <div class="project-notes-toolbar">
-              <el-button type="primary" :icon="Plus" @click="createProjectNote">新建项目笔记</el-button>
-              <el-button text :icon="Refresh" @click="loadProjectNotes">刷新列表</el-button>
+              <el-button type="primary" :icon="Plus" @click="createProjectNote">新建笔记</el-button>
+              <el-dropdown trigger="click" @command="onProjectImportCommand">
+                <el-button type="success" :icon="Upload">导入文档</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="local">从本地导入…</el-dropdown-item>
+                    <el-dropdown-item command="bookshelf">从书柜引入…</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <el-button text :icon="Refresh" @click="loadProjectDocuments">刷新</el-button>
             </div>
-            <div class="project-notes-grid">
-              <el-card
-                v-for="n in projectNotesList"
-                :key="n.id"
-                class="project-note-card"
-                shadow="hover"
-                @click="openProjectNote(n.id)"
-              >
-                <div class="pn-title">{{ n.title?.trim() || `笔记 #${n.id}` }}</div>
-                <div class="pn-meta">{{ n.created_at?.slice(0, 16) }}</div>
-                <p class="pn-snippet">{{ (n.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
-              </el-card>
-              <el-empty v-if="!projectNotesList.length" description="暂无项目笔记" />
-            </div>
+            <el-tabs v-model="projectDocSubTab" class="project-docs-subtabs" type="card">
+              <el-tab-pane label="项目笔记" name="notes">
+                <div class="project-notes-grid">
+                  <el-card
+                    v-for="n in projectNotesList"
+                    :key="n.id"
+                    class="project-note-card"
+                    shadow="hover"
+                    @click="openProjectNote(n.id)"
+                  >
+                    <div class="pn-title">{{ n.title?.trim() || `笔记 #${n.id}` }}</div>
+                    <div class="pn-meta">{{ n.created_at?.slice(0, 16) }}</div>
+                    <p class="pn-snippet">{{ (n.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
+                  </el-card>
+                  <el-empty v-if="!projectNotesList.length" description="暂无项目笔记" />
+                </div>
+              </el-tab-pane>
+              <el-tab-pane label="参考资料 / 外部文档" name="refs">
+                <div class="project-notes-grid">
+                  <el-card
+                    v-for="it in projectRefList"
+                    :key="it.id"
+                    class="project-note-card project-ref-card"
+                    shadow="hover"
+                    @click="openProjectReference(it)"
+                  >
+                    <div class="pn-ref-head">
+                      <el-icon class="pn-ref-icon" :size="22"><component :is="refCardIcon(it)" /></el-icon>
+                      <span class="pn-ref-kind">{{ refKindLabel(it) }}</span>
+                    </div>
+                    <div class="pn-title">
+                      {{ it.title?.trim() || it.source_file_path?.split(/[/\\]/).pop() || `文档 #${it.id}` }}
+                    </div>
+                    <div class="pn-meta">{{ it.created_at?.slice(0, 16) }}</div>
+                    <p class="pn-snippet">{{ it.source_file_path || '（可点击在系统中打开）' }}</p>
+                  </el-card>
+                  <el-empty v-if="!projectRefList.length" description="暂无外部文档，请使用「导入文档」" />
+                </div>
+              </el-tab-pane>
+            </el-tabs>
           </div>
         </el-tab-pane>
         <el-tab-pane label="知识图谱" name="graph" lazy>
@@ -2565,6 +2712,35 @@ onUnmounted(() => {
     </el-main>
     </el-container>
   </el-container>
+
+  <el-dialog
+    v-model="projectImportFromBookshelfVisible"
+    title="从书柜引入到当前项目"
+    width="720px"
+    destroy-on-close
+  >
+    <p class="bookshelf-import-hint">
+      勾选书柜中的笔记或文档，将<strong>复制</strong>一份到当前项目（含文件副本）；书柜中的原件保留。
+    </p>
+    <el-table
+      :data="bookshelfImportList"
+      height="400"
+      @selection-change="onBookshelfPickSelectionChange"
+    >
+      <el-table-column type="selection" width="48" />
+      <el-table-column label="类型" width="88">
+        <template #default="{ row }">
+          {{ row.type === 'note' ? '笔记' : row.type === 'document' ? '文档' : '文件' }}
+        </template>
+      </el-table-column>
+      <el-table-column prop="title" label="标题" min-width="160" show-overflow-tooltip />
+      <el-table-column prop="source_file_path" label="路径" min-width="220" show-overflow-tooltip />
+    </el-table>
+    <template #footer>
+      <el-button @click="projectImportFromBookshelfVisible = false">取消</el-button>
+      <el-button type="primary" @click="confirmImportFromBookshelf">引入到项目</el-button>
+    </template>
+  </el-dialog>
 
   <el-dialog
     v-model="firstLaunchStorageDialogVisible"
@@ -3239,6 +3415,46 @@ onUnmounted(() => {
 .project-notes-pane {
   padding: 16px;
   min-height: 360px;
+}
+.project-documents-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+.project-docs-subtabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.project-docs-subtabs :deep(.el-tabs__header) {
+  margin-bottom: 12px;
+}
+.project-docs-subtabs :deep(.el-tabs__content) {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+.project-docs-subtabs :deep(.el-tab-pane) {
+  height: 100%;
+}
+.pn-ref-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.pn-ref-kind {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+.bookshelf-import-hint {
+  margin: 0 0 12px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
 }
 .project-notes-toolbar {
   display: flex;

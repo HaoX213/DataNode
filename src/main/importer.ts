@@ -299,7 +299,18 @@ export async function importExcelFile(filePath: string, projectId: number): Prom
   }
 }
 
-export async function importDocxFile(filePath: string, projectId: number): Promise<ImportResult> {
+function safeFileName(filePath: string): string {
+  const parsed = path.parse(filePath)
+  const base = parsed.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80) || 'asset'
+  return `${base}-${Date.now()}${parsed.ext}`
+}
+
+export async function importDocxFile(filePath: string, rawProjectId: number): Promise<ImportResult> {
+  const projectId = Number(rawProjectId)
+  if (!Number.isFinite(projectId) || projectId <= 0) {
+    return { success: false, message: '导入 Word 需要有效项目', inserted: 0 }
+  }
+
   let buffer: Buffer
   try {
     buffer = await readFile(path.resolve(filePath))
@@ -319,11 +330,16 @@ export async function importDocxFile(filePath: string, projectId: number): Promi
 
   const notebookId = getDefaultNotebookId()
   try {
+    const projectDir = path.join(app.getPath('userData'), 'project-files', String(projectId))
+    await mkdir(projectDir, { recursive: true })
+    const storedPath = path.join(projectDir, safeFileName(filePath))
+    await copyFile(path.resolve(filePath), storedPath)
     insertDocumentItem({
       notebookId,
       projectId,
-      sourceFilePath: filePath,
-      contentText: text
+      sourceFilePath: storedPath,
+      contentText: text,
+      docKind: 'word'
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -337,19 +353,18 @@ export async function importDocxFile(filePath: string, projectId: number): Promi
   }
 }
 
-function safeFileName(filePath: string): string {
-  const parsed = path.parse(filePath)
-  const base = parsed.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 80) || 'asset'
-  return `${base}-${Date.now()}${parsed.ext}`
-}
-
-export async function importAssetFile(filePath: string, title: string, projectId: number): Promise<ImportResult> {
+export async function importAssetFile(filePath: string, title: string, rawProjectId: number): Promise<ImportResult> {
   const normalizedTitle = title.trim()
   if (!normalizedTitle) {
     return { success: false, message: '资产文件必须填写标题/摘要', inserted: 0 }
   }
 
-  const assetsDir = path.join(app.getPath('userData'), 'assets')
+  const projectId = Number(rawProjectId)
+  if (!Number.isFinite(projectId) || projectId <= 0) {
+    return { success: false, message: '导入参考资料需要有效项目', inserted: 0 }
+  }
+
+  const assetsDir = path.join(app.getPath('userData'), 'project-files', String(projectId))
   try {
     await mkdir(assetsDir, { recursive: true })
     const storedPath = path.join(assetsDir, safeFileName(filePath))
@@ -418,7 +433,8 @@ export async function importFileIntoBookshelf(notebookId: number, filePath: stri
         notebookId,
         projectId: null,
         sourceFilePath: storedPath,
-        contentText: text || `[Word] ${baseTitle}`
+        contentText: text || `[Word] ${baseTitle}`,
+        docKind: 'word'
       })
       return { success: true, message: `已导入 Word 到书柜：${path.basename(resolved)}`, inserted: 1 }
     }

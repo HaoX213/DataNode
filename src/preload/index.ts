@@ -341,6 +341,15 @@ const api = {
     ipcRenderer.invoke('bookshelf:import-file', notebookId, filePath),
   listProjectNotes: (projectId: number): Promise<{ success: boolean; data: ItemRow[] }> =>
     ipcRenderer.invoke('project:notes:list', projectId),
+  listProjectDocuments: (
+    projectId: number
+  ): Promise<{ success: boolean; message?: string; data?: { notes: ItemRow[]; references: ItemRow[] } }> =>
+    ipcRenderer.invoke('project:documents:list', projectId),
+  copyBookshelfItemsToProject: (
+    itemIds: number[],
+    projectId: number
+  ): Promise<ActionResult & { data?: { ids: number[] } }> =>
+    ipcRenderer.invoke('project:documents:copy-from-bookshelf', itemIds, projectId),
   openPathWithShell: (filePath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('shell:open-path', filePath),
   listProjects: (): Promise<ProjectsResult> => ipcRenderer.invoke('projects:list'),
@@ -382,6 +391,8 @@ const api = {
   pickImportFile: (): Promise<PickImportFileResult> => ipcRenderer.invoke('db:items:pick-import-file'),
   pickBookshelfDocumentFile: (): Promise<PickImportFileResult> =>
     ipcRenderer.invoke('bookshelf:pick-document-file'),
+  pickProjectDocumentFile: (): Promise<PickImportFileResult> =>
+    ipcRenderer.invoke('project:pick-document-file'),
   importFile: (filePath: string, title?: string, projectId?: number): Promise<ImportResult> =>
     ipcRenderer.invoke('db:items:import', filePath, title, projectId),
   importStructuredJson: (payload: {

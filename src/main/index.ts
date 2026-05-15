@@ -23,6 +23,7 @@ import {
   insertNoteItem,
   insertStructuredJsonRows,
   listItems,
+  copyBookshelfItemsToProject,
   createNotebook,
   deleteNotebook,
   renameNotebook,
@@ -30,6 +31,7 @@ import {
   listAllBookshelfGlobalItems,
   listBookshelfImportCandidates,
   listProjectNotes,
+  listProjectDocuments,
   listNotebookTree,
   listNotebooks,
   listProjects,
@@ -322,6 +324,32 @@ app.whenReady().then(() => {
       return { success: false, message: String(error), data: [] }
     }
   })
+  ipcMain.handle('project:documents:list', (_, projectId: number) => {
+    try {
+      return { success: true, data: toSerializable(listProjectDocuments(Number(projectId))) }
+    } catch (error) {
+      return { success: false, message: String(error), data: { notes: [], references: [] } }
+    }
+  })
+  ipcMain.handle('project:documents:copy-from-bookshelf', (_, itemIds: unknown, projectId: number) => {
+    try {
+      const ids = Array.isArray(itemIds)
+        ? itemIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+        : []
+      const pid = Number(projectId)
+      if (!Number.isFinite(pid) || pid <= 0) {
+        return { success: false, message: '无效项目', data: { ids: [] as number[] } }
+      }
+      const created = copyBookshelfItemsToProject(ids, pid)
+      return {
+        success: true,
+        message: `已引入 ${created.length} 条到当前项目`,
+        data: { ids: created }
+      }
+    } catch (error) {
+      return { success: false, message: String(error), data: { ids: [] as number[] } }
+    }
+  })
   ipcMain.handle('shell:open-path', (_, filePath: string) => {
     void shell.openPath(String(filePath ?? ''))
     return { success: true }
@@ -500,8 +528,16 @@ app.whenReady().then(() => {
       return { success: false, message: `保存失败: ${String(error)}` }
     }
   })
-  ipcMain.handle('db:items:list', (_, projectId?: number) => listItems(Number(projectId)))
-  ipcMain.handle('db:items:search', (_, keyword: string, projectId?: number) => searchItems(keyword ?? '', Number(projectId)))
+  ipcMain.handle('db:items:list', (_, projectId?: number) => {
+    const p = Number(projectId)
+    if (!Number.isFinite(p) || p <= 0) return []
+    return listItems(p)
+  })
+  ipcMain.handle('db:items:search', (_, keyword: string, projectId?: number) => {
+    const p = Number(projectId)
+    if (!Number.isFinite(p) || p <= 0) return []
+    return searchItems(keyword ?? '', p)
+  })
   ipcMain.handle('settings:get', () => {
     try {
       return { success: true, data: toSerializable(getAppSettings()) }
@@ -643,6 +679,9 @@ app.whenReady().then(() => {
             : projectId !== undefined && Number.isFinite(Number(projectId)) && Number(projectId) > 0
               ? Number(projectId)
               : undefined
+        if (pid === undefined) {
+          return { success: false, message: '请指定所属项目，或使用书柜模式创建笔记' }
+        }
         const noteId = insertNoteItem({
           notebookId: nb,
           projectId: pid,
@@ -832,6 +871,28 @@ app.whenReady().then(() => {
     }
     return { success: true, filePath: picked.filePaths[0] }
   })
+  ipcMain.handle('project:pick-document-file', async () => {
+    const focusedWindow = BrowserWindow.getFocusedWindow()
+    const options: OpenDialogOptions = {
+      title: '导入文档到当前项目',
+      properties: ['openFile'],
+      filters: [
+        {
+          name: '文档',
+          extensions: ['pdf', 'docx', 'doc', 'txt', 'md', 'html', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']
+        },
+        { name: '表格', extensions: ['xlsx', 'xls', 'csv', 'json'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    }
+    const picked = focusedWindow
+      ? await dialog.showOpenDialog(focusedWindow, options)
+      : await dialog.showOpenDialog(options)
+    if (picked.canceled || picked.filePaths.length === 0) {
+      return { success: false, message: '已取消' }
+    }
+    return { success: true, filePath: picked.filePaths[0] }
+  })
   ipcMain.handle('db:items:import', async (_, filePath: string, title = '', projectId?: number) => {
     if (!filePath) {
       return { success: false, message: '未选择文件', inserted: 0 }
@@ -867,19 +928,23 @@ app.whenReady().then(() => {
           filePath: resolvedSource
         }
       }
+      const pid = projectId != null && Number.isFinite(Number(projectId)) && Number(projectId) > 0 ? Number(projectId) : null
+      if (pid == null) {
+        return { success: false, message: '请先进入项目工作区，再导入此文件', inserted: 0 }
+      }
       if (ext.endsWith('.xlsx') || ext.endsWith('.xls')) {
-        return await importExcelFile(resolvedSource, Number(projectId))
+        return await importExcelFile(resolvedSource, pid)
       }
       if (ext.endsWith('.csv')) {
-        return await importCsvFile(resolvedSource, Number(projectId))
+        return await importCsvFile(resolvedSource, pid)
       }
       if (ext.endsWith('.json')) {
-        return await importJsonTableFile(resolvedSource, Number(projectId))
+        return await importJsonTableFile(resolvedSource, pid)
       }
       if (ext.endsWith('.docx')) {
-        return await importDocxFile(resolvedSource, Number(projectId))
+        return await importDocxFile(resolvedSource, pid)
       }
-      return await importAssetFile(resolvedSource, title, Number(projectId))
+      return await importAssetFile(resolvedSource, title, pid)
     } catch (error) {
       const message = formatImportError(error)
       appendLog('ERROR', `Import failed: ${resolvedSource} — ${message}`)

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
-import { mkdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { copyFileSync, mkdirSync } from 'node:fs'
+import { basename, extname, join, resolve } from 'node:path'
 
 let db: Database.Database | null = null
 let initialized = false
@@ -92,6 +92,62 @@ function ensureItemPositionColumns(database: Database.Database): void {
   if (!columnNames.has('y')) {
     database.exec('ALTER TABLE items ADD COLUMN y REAL;')
   }
+}
+
+const BOOKSHELF_PATH_REPAIR_KEY = 'v16_bookshelf_path_isolation'
+
+/** 历史版本误将书柜文件（路径含 bookshelf-files）写上 project_id；一次性纠正为书柜全局 */
+function runV16BookshelfPathRepair(database: Database.Database): void {
+  const row = database.prepare('SELECT value FROM settings WHERE key = ?').get(BOOKSHELF_PATH_REPAIR_KEY) as
+    | { value: string }
+    | undefined
+  if (row?.value === '1') return
+  database
+    .prepare(
+      `
+      UPDATE items SET project_id = NULL
+      WHERE project_id IS NOT NULL
+        AND IFNULL(source_file_path, '') != ''
+        AND INSTR(lower(source_file_path), 'bookshelf-files') > 0
+    `
+    )
+    .run()
+  database
+    .prepare(
+      `
+      INSERT INTO settings (key, value, updated_at)
+      VALUES (@key, '1', datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `
+    )
+    .run({ key: BOOKSHELF_PATH_REPAIR_KEY })
+}
+
+function inferAssetDocKind(extension: string): string {
+  const e = (extension || '').toLowerCase()
+  if (e === '.pdf') return 'pdf'
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(e)) return 'image'
+  if (e === '.doc' || e === '.docx') return 'word'
+  return 'other'
+}
+
+function resolveNoteItemProjectId(projectId?: number | null): number | null {
+  if (projectId === null) return null
+  const n = Number(projectId)
+  if (Number.isFinite(n) && n > 0) return n
+  throw new Error('笔记须指定有效 projectId（正整数）或 null（书柜）')
+}
+
+function resolveDocumentItemProjectId(projectId?: number | null): number | null {
+  if (projectId === null) return null
+  const n = Number(projectId)
+  if (Number.isFinite(n) && n > 0) return n
+  throw new Error('文档条目须指定有效 projectId 或 null（书柜）')
+}
+
+function strictListProjectId(projectId?: number | null): number | null {
+  if (projectId == null || !Number.isFinite(Number(projectId)) || Number(projectId) <= 0) return null
+  return Number(projectId)
 }
 
 function ensureNotebookHierarchyColumns(database: Database.Database): void {
@@ -702,6 +758,7 @@ export function initDatabase(): void {
   ensureItemsSupportsAssetNodes(database)
   ensureItemPositionColumns(database)
   ensureProjectUiAndAiTables(database)
+  runV16BookshelfPathRepair(database)
 
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_node_tags_node_id ON node_tags(node_id);
@@ -987,14 +1044,15 @@ export function listBookshelfImportCandidates(): ItemRow[] {
     .all() as ItemRow[]
 }
 
-export function listProjectNotes(projectId: number): ItemRow[] {
+export function listProjectDocuments(projectId: number): { notes: ItemRow[]; references: ItemRow[] } {
   const database = getDb()
   const pid = Number(projectId)
-  if (!Number.isFinite(pid) || pid <= 0) return []
-  return database
+  if (!Number.isFinite(pid) || pid <= 0) return { notes: [], references: [] }
+  const cols = `id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at`
+  const notes = database
     .prepare(
       `
-      SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at, updated_at
+      SELECT ${cols}
       FROM items
       WHERE project_id = @pid AND type = 'note'
       ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
@@ -1002,6 +1060,22 @@ export function listProjectNotes(projectId: number): ItemRow[] {
     `
     )
     .all({ pid }) as ItemRow[]
+  const references = database
+    .prepare(
+      `
+      SELECT ${cols}
+      FROM items
+      WHERE project_id = @pid AND type IN ('document', 'file')
+      ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
+      LIMIT 500
+    `
+    )
+    .all({ pid }) as ItemRow[]
+  return { notes, references }
+}
+
+export function listProjectNotes(projectId: number): ItemRow[] {
+  return listProjectDocuments(projectId).notes
 }
 
 export type ItemRow = {
@@ -1146,28 +1220,29 @@ export function insertStructuredJsonRows(args: {
   return insertExcelRows(payload)
 }
 
-function resolveProjectIdForInsert(projectId?: number | null): number | null {
-  if (projectId === null) return null
-  if (projectId !== undefined && Number.isFinite(Number(projectId)) && Number(projectId) > 0) {
-    return Number(projectId)
-  }
-  return getDefaultProjectId()
-}
-
 export function insertDocumentItem(args: {
   notebookId: number
   projectId?: number | null
   sourceFilePath: string
   contentText: string
+  docKind?: string
 }): number {
   const database = getDb()
-  const projectId = resolveProjectIdForInsert(args.projectId)
+  const projectId = resolveDocumentItemProjectId(args.projectId)
+  const kind = args.docKind ?? 'word'
+  const contentJson = JSON.stringify({ dnDocKind: kind })
   const result = database
     .prepare(`
       INSERT INTO items (notebook_id, project_id, type, title, source_file_path, content_text, content_json)
-      VALUES (@notebookId, @projectId, 'document', '', @sourceFilePath, @contentText, '')
+      VALUES (@notebookId, @projectId, 'document', '', @sourceFilePath, @contentText, @contentJson)
     `)
-    .run({ notebookId: args.notebookId, projectId, sourceFilePath: args.sourceFilePath, contentText: args.contentText })
+    .run({
+      notebookId: args.notebookId,
+      projectId,
+      sourceFilePath: args.sourceFilePath,
+      contentText: args.contentText,
+      contentJson
+    })
   return Number(result.lastInsertRowid)
 }
 
@@ -1180,8 +1255,9 @@ export function insertAssetItem(args: {
   extension: string
 }): number {
   const database = getDb()
-  const projectId = resolveProjectIdForInsert(args.projectId)
+  const projectId = resolveDocumentItemProjectId(args.projectId)
   const title = args.title.trim()
+  const dnKind = inferAssetDocKind(args.extension)
   const result = database
     .prepare(`
       INSERT INTO items (notebook_id, project_id, type, title, source_file_path, content_text, content_json)
@@ -1196,7 +1272,8 @@ export function insertAssetItem(args: {
         title,
         originalFilePath: args.originalFilePath,
         filePath: args.sourceFilePath,
-        extension: args.extension
+        extension: args.extension,
+        dnDocKind: dnKind
       })
     })
   return Number(result.lastInsertRowid)
@@ -1204,43 +1281,46 @@ export function insertAssetItem(args: {
 
 export function listItems(projectId?: number): ItemRow[] {
   const database = getDb()
+  const pid = strictListProjectId(projectId)
+  if (pid == null) return []
   const stmt = database.prepare(`
-    SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+    SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at
     FROM items
-    WHERE (@projectId IS NULL OR project_id = @projectId)
+    WHERE project_id = @pid
     ORDER BY id DESC
     LIMIT 500
   `)
-  return stmt.all({ projectId: Number.isFinite(projectId) ? projectId : null }) as ItemRow[]
+  return stmt.all({ pid }) as ItemRow[]
 }
 
 export function searchItems(keyword: string, projectId?: number): ItemRow[] {
   const database = getDb()
+  const pid = strictListProjectId(projectId)
+  if (pid == null) return []
   const normalized = keyword.trim()
-  if (!normalized) return listItems(projectId)
+  if (!normalized) return listItems(pid)
 
-  // 对全文与结构化 JSON 都做模糊匹配，满足全局搜索需求
   const stmt = database.prepare(`
-    SELECT id, project_id, type, title, content_text, content_json, source_file_path, created_at
+    SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path, created_at
     FROM items
-    WHERE (@projectId IS NULL OR project_id = @projectId)
+    WHERE project_id = @pid
       AND (content_text LIKE @q OR content_json LIKE @q)
     ORDER BY datetime(created_at) DESC, id DESC
     LIMIT 500
   `)
-  return stmt.all({ q: `%${normalized}%`, projectId: Number.isFinite(projectId) ? projectId : null }) as ItemRow[]
+  return stmt.all({ q: `%${normalized}%`, pid }) as ItemRow[]
 }
 
 export function insertNoteItem(args: {
   notebookId: number
-  /** null：书柜全局笔记；省略或 undefined：写入默认项目 */
+  /** null：书柜；正整数：所属项目（禁止省略，以免误入默认项目） */
   projectId?: number | null
   title: string
   contentText: string
   tags: string[]
 }): number {
   const database = getDb()
-  const projectId = resolveProjectIdForInsert(args.projectId)
+  const projectId = resolveNoteItemProjectId(args.projectId)
   const text = args.contentText.trim()
   const title = args.title.trim()
   const normalizedTags = Array.from(
@@ -1291,6 +1371,109 @@ export function insertNoteItem(args: {
   return tx()
 }
 
+/** 将书柜全局条目复制到指定项目（笔记深拷贝正文与标签；文件复制到 project-files/{id}/） */
+export function copyBookshelfItemsToProject(itemIds: number[], projectId: number): number[] {
+  const database = getDb()
+  const pid = Number(projectId)
+  if (!Number.isFinite(pid) || pid <= 0) throw new Error('无效项目')
+
+  const projectDir = join(app.getPath('userData'), 'project-files', String(pid))
+  mkdirSync(projectDir, { recursive: true })
+
+  const inserted: number[] = []
+  const notebookId = getDefaultNotebookId()
+
+  for (const rawId of itemIds) {
+    const id = Number(rawId)
+    if (!Number.isFinite(id)) continue
+    const row = database
+      .prepare(
+        `SELECT id, notebook_id, project_id, type, title, content_text, content_json, source_file_path
+         FROM items WHERE id = ?`
+      )
+      .get(id) as
+      | {
+          id: number
+          notebook_id: number
+          project_id: number | null
+          type: ItemRow['type']
+          title: string
+          content_text: string
+          content_json: string
+          source_file_path: string
+        }
+      | undefined
+    if (!row || row.project_id != null) continue
+    if (row.type !== 'note' && row.type !== 'file' && row.type !== 'document') continue
+
+    if (row.type === 'note') {
+      const newId = insertNoteItem({
+        notebookId,
+        projectId: pid,
+        title: row.title,
+        contentText: row.content_text?.trim() ? row.content_text : '<p><br></p>',
+        tags: []
+      })
+      const tagRows = database.prepare('SELECT tag_id FROM node_tags WHERE node_id = ?').all(id) as Array<{ tag_id: number }>
+      for (const t of tagRows) {
+        database.prepare('INSERT OR IGNORE INTO node_tags (node_id, tag_id) VALUES (?, ?)').run(newId, t.tag_id)
+      }
+      inserted.push(newId)
+      continue
+    }
+
+    const src = row.source_file_path?.trim()
+    if (!src) continue
+    const dest = join(projectDir, `${Date.now()}-${basename(src)}`)
+    try {
+      copyFileSync(src, dest)
+    } catch {
+      continue
+    }
+
+    if (row.type === 'document') {
+      let docKind = 'word'
+      try {
+        const p = JSON.parse(row.content_json || '{}') as { dnDocKind?: string }
+        if (typeof p.dnDocKind === 'string' && p.dnDocKind.trim()) docKind = p.dnDocKind.trim()
+      } catch {
+        /* keep default */
+      }
+      const nid = insertDocumentItem({
+        notebookId,
+        projectId: pid,
+        sourceFilePath: dest,
+        contentText: row.content_text || '',
+        docKind
+      })
+      inserted.push(nid)
+      continue
+    }
+
+    let ext = ''
+    let title = row.title.trim()
+    try {
+      const meta = JSON.parse(row.content_json || '{}') as { extension?: string; title?: string }
+      if (typeof meta.extension === 'string') ext = meta.extension
+      if (typeof meta.title === 'string' && meta.title.trim()) title = meta.title.trim()
+    } catch {
+      /* ignore */
+    }
+    if (!title) title = basename(dest)
+    const aid = insertAssetItem({
+      notebookId,
+      projectId: pid,
+      title,
+      sourceFilePath: dest,
+      originalFilePath: src,
+      extension: ext || extname(dest)
+    })
+    inserted.push(aid)
+  }
+
+  return inserted
+}
+
 export function clearItemsForRetest(projectId?: number): void {
   const database = getDb()
   if (Number.isFinite(projectId)) {
@@ -1334,18 +1517,21 @@ export function getAllTags(projectId?: number, bookshelfOnly?: boolean): TagRow[
     }))
   }
 
+  const pid = strictListProjectId(projectId)
+  if (pid == null) return []
+
   const rows = database
     .prepare(
       `
       SELECT DISTINCT t.id, t.name, t.color
       FROM tags t
-      LEFT JOIN node_tags nt ON nt.tag_id = t.id
-      LEFT JOIN items i ON i.id = nt.node_id
-      WHERE @projectId IS NULL OR i.project_id = @projectId
+      INNER JOIN node_tags nt ON nt.tag_id = t.id
+      INNER JOIN items i ON i.id = nt.node_id
+      WHERE i.project_id = @projectId
       ORDER BY t.name ASC
     `
     )
-    .all({ projectId: Number.isFinite(projectId) ? projectId : null }) as TagRow[]
+    .all({ projectId: Number(projectId) }) as TagRow[]
   return rows.map((row) => ({
     id: row.id,
     name: row.name,
@@ -1635,14 +1821,17 @@ function getNodeDisplayName(row: { id: number; title?: string; content_text?: st
 
 export function searchNodes(keyword: string, excludeId?: number, projectId?: number): NodeSearchResult[] {
   const database = getDb()
+  const pid = strictListProjectId(projectId)
+  if (pid == null) return []
+
   const normalized = keyword.trim()
   const rows = database
     .prepare(
       `
       SELECT id, type, title, content_text
       FROM items
-      WHERE (@excludeId IS NULL OR id != @excludeId)
-        AND (@projectId IS NULL OR project_id = @projectId)
+      WHERE project_id = @projectId
+        AND (@excludeId IS NULL OR id != @excludeId)
         AND (
           @q = ''
           OR title LIKE @likeQ
@@ -1655,7 +1844,7 @@ export function searchNodes(keyword: string, excludeId?: number, projectId?: num
     )
     .all({
       excludeId: Number.isFinite(excludeId) ? excludeId : null,
-      projectId: Number.isFinite(projectId) ? projectId : null,
+      projectId: pid,
       q: normalized,
       likeQ: `%${normalized}%`
     }) as Array<{ id: number; type: ItemRow['type']; title: string; content_text: string }>
@@ -1851,10 +2040,17 @@ function filterGraphData(graph: GraphData, filters: GraphFilterInput = {}): Grap
 
 export function getGraphData(filters: GraphFilterInput = {}): GraphData {
   const database = getDb()
-  const projectId = Number.isFinite(filters.projectId) ? filters.projectId : null
   const bookshelfOnly = Boolean(filters.bookshelfOnly)
+  const strictPid = strictListProjectId(filters.projectId)
 
-  const nodeRows = database.prepare(`
+  if (!bookshelfOnly && strictPid == null) {
+    return filterGraphData({ nodes: [], edges: [] }, filters)
+  }
+
+  const projectId = bookshelfOnly ? null : strictPid
+
+  const nodeRows = database
+    .prepare(`
     SELECT
       i.id AS node_id,
       i.type AS node_type,
@@ -1870,12 +2066,13 @@ export function getGraphData(filters: GraphFilterInput = {}): GraphData {
     LEFT JOIN tags t ON t.id = nt.tag_id
     WHERE
       (@bookshelfOnly = 1 AND i.project_id IS NULL)
-      OR (@bookshelfOnly = 0 AND (@projectId IS NULL OR i.project_id = @projectId))
+      OR (@bookshelfOnly = 0 AND i.project_id = @projectId)
     ORDER BY i.id ASC
-  `).all({
-    projectId,
-    bookshelfOnly: bookshelfOnly ? 1 : 0
-  }) as Array<{
+  `)
+    .all({
+      projectId,
+      bookshelfOnly: bookshelfOnly ? 1 : 0
+    }) as Array<{
     node_id: number
     node_type: ItemRow['type']
     node_title: string
@@ -1909,16 +2106,18 @@ export function getGraphData(filters: GraphFilterInput = {}): GraphData {
     }
   }
 
-  const edgeRows = database.prepare(`
+  const edgeRows = database
+    .prepare(`
     SELECT r.id, r.source_id AS source, r.target_id AS target, r.relation_label AS label
     FROM node_relations r
     INNER JOIN items source ON source.id = r.source_id
     INNER JOIN items target ON target.id = r.target_id
     WHERE
       (@bookshelfOnly = 1 AND source.project_id IS NULL AND target.project_id IS NULL)
-      OR (@bookshelfOnly = 0 AND (@projectId IS NULL OR (source.project_id = @projectId AND target.project_id = @projectId)))
+      OR (@bookshelfOnly = 0 AND source.project_id = @projectId AND target.project_id = @projectId)
     ORDER BY r.id ASC
-  `).all({ projectId, bookshelfOnly: bookshelfOnly ? 1 : 0 }) as GraphEdge[]
+  `)
+    .all({ projectId, bookshelfOnly: bookshelfOnly ? 1 : 0 }) as GraphEdge[]
   const edges = edgeRows.map((edge) => ({
     id: edge.id,
     source: edge.source,
