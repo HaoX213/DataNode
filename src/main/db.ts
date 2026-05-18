@@ -1154,6 +1154,22 @@ export function deleteBookshelfGlobalItem(itemId: number): void {
   database.prepare('DELETE FROM items WHERE id = ?').run(itemId)
 }
 
+/** 批量删除书柜全局条目（跳过无效 id） */
+export function deleteBookshelfGlobalItems(itemIds: number[]): { ok: number; failed: number } {
+  const uniq = [...new Set(itemIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+  let ok = 0
+  let failed = 0
+  for (const id of uniq) {
+    try {
+      deleteBookshelfGlobalItem(id)
+      ok++
+    } catch {
+      failed++
+    }
+  }
+  return { ok, failed }
+}
+
 export function duplicateBookshelfNote(sourceId: number): number {
   const database = getDb()
   const row = database
@@ -1676,6 +1692,24 @@ export function deleteProjectDocumentItem(itemId: number, projectId: number): vo
   database.prepare('DELETE FROM node_relations WHERE source_id = ? OR target_id = ?').run(itemId, itemId)
   database.prepare('DELETE FROM node_tags WHERE node_id = ?').run(itemId)
   database.prepare('DELETE FROM items WHERE id = ?').run(itemId)
+}
+
+/** 批量删除项目文档（同 deleteProjectDocumentItem 规则） */
+export function deleteProjectDocumentItems(itemIds: number[], projectId: number): { ok: number; failed: number } {
+  const pid = Number(projectId)
+  if (!Number.isFinite(pid) || pid <= 0) throw new Error('无效项目')
+  const uniq = [...new Set(itemIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+  let ok = 0
+  let failed = 0
+  for (const id of uniq) {
+    try {
+      deleteProjectDocumentItem(id, pid)
+      ok++
+    } catch {
+      failed++
+    }
+  }
+  return { ok, failed }
 }
 
 export function copyBookshelfItemsToProject(itemIds: number[], projectId: number): number[] {

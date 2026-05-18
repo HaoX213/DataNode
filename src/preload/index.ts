@@ -354,6 +354,8 @@ const api = {
     ipcRenderer.invoke('bookshelf:item:move', itemId, notebookId),
   deleteBookshelfItem: (itemId: number): Promise<ActionResult> =>
     ipcRenderer.invoke('bookshelf:item:delete', itemId),
+  deleteBookshelfItemsBatch: (itemIds: number[]): Promise<ActionResult & { data?: { ok: number; failed: number } }> =>
+    ipcRenderer.invoke('bookshelf:items:delete-batch', itemIds),
   duplicateBookshelfNote: (itemId: number): Promise<ActionResult & { data?: { id: number } }> =>
     ipcRenderer.invoke('bookshelf:note:duplicate', itemId),
   renameBookshelfItem: (itemId: number, title: string): Promise<ActionResult> =>
@@ -377,6 +379,11 @@ const api = {
     ipcRenderer.invoke('project:item:rename', itemId, projectId, title),
   deleteProjectDocument: (itemId: number, projectId: number): Promise<ActionResult> =>
     ipcRenderer.invoke('project:item:delete', itemId, projectId),
+  deleteProjectDocumentsBatch: (
+    itemIds: number[],
+    projectId: number
+  ): Promise<ActionResult & { data?: { ok: number; failed: number } }> =>
+    ipcRenderer.invoke('project:items:delete-batch', itemIds, projectId),
   openPathWithShell: (filePath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('shell:open-path', filePath),
   listProjects: (): Promise<ProjectsResult> => ipcRenderer.invoke('projects:list'),

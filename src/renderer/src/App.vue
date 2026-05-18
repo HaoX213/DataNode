@@ -2,12 +2,13 @@
 import * as echarts from 'echarts'
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { CheckboxValueType } from 'element-plus'
 import DashboardView from './components/DashboardView.vue'
 import RawDataView from './components/RawDataView.vue'
 import BookshelfView from './components/BookshelfView.vue'
 import NoteEditorShell from './components/NoteEditorShell.vue'
 import type { AiMessageRow, AiTopicRow, ChartCardConfig, DashboardUiPersistV1, ProjectUiStateV1 } from '../../preload/index'
-import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Grid, Hide, List, MagicStick, MoreFilled, Picture, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
+import { Close, Delete, Document, EditPen, Expand, Filter, Fold, FolderOpened, FullScreen, Grid, Hide, List, MagicStick, MoreFilled, Operation, Picture, Plus, Reading, Refresh, Search, Upload, View } from '@element-plus/icons-vue'
 
 type ItemRow = {
   id: number
@@ -158,6 +159,9 @@ const projectNotesList = ref<ItemRow[]>([])
 const projectRefList = ref<ItemRow[]>([])
 const projectDocSubTab = ref<'notes' | 'refs'>('notes')
 const projectDocViewMode = ref<'tabs' | 'unified'>('tabs')
+const projectDocBulkManual = ref(false)
+const projectDocBulkSelected = ref<number[]>([])
+const projectDocBulkDeleting = ref(false)
 const projectDocContextVisible = ref(false)
 const projectDocMenuX = ref(0)
 const projectDocMenuY = ref(0)
@@ -1184,7 +1188,11 @@ async function handleProjectDocMenuOpen(): Promise<void> {
   const it = projectDocContextItem.value
   closeProjectDocContextMenu()
   if (!it) return
-  openProjectDocumentItem(it)
+  if (it.type === 'note') {
+    void openProjectNote(it.id)
+    return
+  }
+  void openProjectReference(it)
 }
 
 async function handleProjectDocMenuRename(): Promise<void> {
@@ -1247,11 +1255,111 @@ async function openProjectReference(it: ItemRow): Promise<void> {
 }
 
 function openProjectDocumentItem(it: ItemRow): void {
+  if (projectDocBulkPickActive.value) return
   if (it.type === 'note') {
     void openProjectNote(it.id)
     return
   }
   void openProjectReference(it)
+}
+
+const projectDocBulkPickActive = computed(() => projectDocBulkManual.value || projectDocBulkSelected.value.length > 0)
+
+const projectDocBulkBarVisible = computed(() => projectDocBulkSelected.value.length > 0)
+
+const projectDocSelectableIds = computed(() => {
+  if (projectDocViewMode.value === 'unified') {
+    return [...projectNotesList.value, ...projectRefList.value].map((r) => r.id)
+  }
+  if (projectDocSubTab.value === 'notes') return projectNotesList.value.map((r) => r.id)
+  return projectRefList.value.map((r) => r.id)
+})
+
+const projectDocBulkSelectAllChecked = computed(() => {
+  const all = projectDocSelectableIds.value
+  return all.length > 0 && all.every((id) => projectDocBulkSelected.value.includes(id))
+})
+
+const projectDocBulkSelectAllIndeterminate = computed(() => {
+  const all = projectDocSelectableIds.value
+  const n = projectDocBulkSelected.value.length
+  return n > 0 && n < all.length
+})
+
+watch([projectDocSubTab, projectDocViewMode], () => {
+  projectDocBulkSelected.value = []
+  projectDocBulkManual.value = false
+})
+
+function toggleProjectDocSelection(id: number): void {
+  const s = new Set(projectDocBulkSelected.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  projectDocBulkSelected.value = [...s]
+  if (projectDocBulkSelected.value.length > 0) projectDocBulkManual.value = true
+}
+
+function onProjectDocCardClick(it: ItemRow, e: MouseEvent): void {
+  if (projectDocBulkPickActive.value) {
+    e.preventDefault()
+    toggleProjectDocSelection(it.id)
+    return
+  }
+  openProjectDocumentItem(it)
+}
+
+function toggleProjectDocBulkManual(): void {
+  projectDocBulkManual.value = !projectDocBulkManual.value
+  if (!projectDocBulkManual.value && projectDocBulkSelected.value.length === 0) {
+    /* stays off */
+  }
+}
+
+function projectDocSelectAllInView(): void {
+  projectDocBulkSelected.value = [...projectDocSelectableIds.value]
+  projectDocBulkManual.value = true
+}
+
+function onProjectDocBulkSelectAllChange(val: CheckboxValueType): void {
+  if (val === true) {
+    projectDocSelectAllInView()
+  } else {
+    projectDocBulkSelected.value = []
+  }
+}
+
+function exitProjectDocBulkMode(): void {
+  projectDocBulkSelected.value = []
+  projectDocBulkManual.value = false
+}
+
+async function projectDocBulkDelete(): Promise<void> {
+  const ids = projectDocBulkSelected.value
+  const pid = currentProjectId.value
+  if (!ids.length || pid == null) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${ids.length} 个文件吗？此操作不可恢复。`,
+      '批量删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  projectDocBulkDeleting.value = true
+  try {
+    const r = await window.api.deleteProjectDocumentsBatch(ids, pid)
+    if (!r.success) {
+      ElMessage.error(r.message || '批量删除失败')
+      return
+    }
+    ElMessage.success(r.message || '已删除')
+    exitProjectDocBulkMode()
+    await loadProjectDocuments()
+    await runSearch()
+  } finally {
+    projectDocBulkDeleting.value = false
+  }
 }
 
 async function onProjectImportCommand(cmd: 'local' | 'bookshelf'): Promise<void> {
@@ -2777,22 +2885,50 @@ onUnmounted(() => {
         </el-tab-pane>
         <el-tab-pane label="项目文档 (Project Documents)" name="notes">
           <div class="project-notes-pane project-documents-pane">
-            <div class="project-notes-toolbar">
-              <el-button type="primary" :icon="Plus" @click="createProjectNote">新建笔记</el-button>
-              <el-dropdown trigger="click" @command="onProjectImportCommand">
-                <el-button type="success" :icon="Upload">导入文档</el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="local">从本地导入…</el-dropdown-item>
-                    <el-dropdown-item command="bookshelf">从书柜引入…</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-              <el-button text :icon="Refresh" @click="loadProjectDocuments">刷新</el-button>
-              <el-tooltip :content="projectDocViewMode === 'tabs' ? '切换为分类瀑布流' : '切换为分栏标签'" placement="bottom">
-                <el-button circle text :icon="projectDocViewMode === 'tabs' ? Grid : List" @click="toggleProjectDocViewMode" />
-              </el-tooltip>
-            </div>
+            <transition name="proj-doc-toolbar" mode="out-in">
+              <div v-if="projectDocBulkBarVisible" key="bulk" class="project-notes-toolbar project-notes-toolbar--bulk">
+                <div class="pdtb-left">
+                  <span class="pdtb-count">已选择 {{ projectDocBulkSelected.length }} 项</span>
+                  <el-checkbox
+                    :model-value="projectDocBulkSelectAllChecked"
+                    :indeterminate="projectDocBulkSelectAllIndeterminate"
+                    @change="onProjectDocBulkSelectAllChange"
+                  >
+                    全选当前列表
+                  </el-checkbox>
+                </div>
+                <div class="pdtb-right">
+                  <el-button type="danger" plain :loading="projectDocBulkDeleting" @click="projectDocBulkDelete">
+                    批量删除
+                  </el-button>
+                  <el-button @click="exitProjectDocBulkMode">退出选择</el-button>
+                </div>
+              </div>
+              <div v-else key="normal" class="project-notes-toolbar">
+                <el-button type="primary" :icon="Plus" @click="createProjectNote">新建笔记</el-button>
+                <el-dropdown trigger="click" @command="onProjectImportCommand">
+                  <el-button type="success" :icon="Upload">导入文档</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="local">从本地导入…</el-dropdown-item>
+                      <el-dropdown-item command="bookshelf">从书柜引入…</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <el-button text :icon="Refresh" @click="loadProjectDocuments">刷新</el-button>
+                <el-button
+                  :type="projectDocBulkManual ? 'primary' : 'default'"
+                  plain
+                  :icon="Operation"
+                  @click="toggleProjectDocBulkManual"
+                >
+                  批量选择
+                </el-button>
+                <el-tooltip :content="projectDocViewMode === 'tabs' ? '切换为分类瀑布流' : '切换为分栏标签'" placement="bottom">
+                  <el-button circle text :icon="projectDocViewMode === 'tabs' ? Grid : List" @click="toggleProjectDocViewMode" />
+                </el-tooltip>
+              </div>
+            </transition>
             <template v-if="projectDocViewMode === 'tabs'">
               <el-tabs v-model="projectDocSubTab" class="project-docs-subtabs" type="card">
                 <el-tab-pane label="项目笔记" name="notes">
@@ -2801,10 +2937,20 @@ onUnmounted(() => {
                       v-for="n in projectNotesList"
                       :key="n.id"
                       class="project-note-card"
+                      :class="{
+                        'is-bulk-pick': projectDocBulkPickActive,
+                        'is-bulk-selected': projectDocBulkSelected.includes(n.id)
+                      }"
                       shadow="hover"
-                      @click="openProjectDocumentItem(n)"
+                      @click="onProjectDocCardClick(n, $event)"
                       @contextmenu.prevent="showProjectDocContextMenu($event, n)"
                     >
+                      <div
+                        class="pnc-bulk-cb"
+                        @click.stop="toggleProjectDocSelection(n.id)"
+                      >
+                        <el-checkbox :model-value="projectDocBulkSelected.includes(n.id)" />
+                      </div>
                       <div class="pn-title">{{ n.title?.trim() || `笔记 #${n.id}` }}</div>
                       <div class="pn-meta">{{ n.created_at?.slice(0, 16) }}</div>
                       <p class="pn-snippet">{{ (n.content_text || '').replace(/<[^>]+>/g, '').slice(0, 140) }}</p>
@@ -2818,10 +2964,17 @@ onUnmounted(() => {
                       v-for="it in projectRefList"
                       :key="it.id"
                       class="project-note-card project-ref-card"
+                      :class="{
+                        'is-bulk-pick': projectDocBulkPickActive,
+                        'is-bulk-selected': projectDocBulkSelected.includes(it.id)
+                      }"
                       shadow="hover"
-                      @click="openProjectDocumentItem(it)"
+                      @click="onProjectDocCardClick(it, $event)"
                       @contextmenu.prevent="showProjectDocContextMenu($event, it)"
                     >
+                      <div class="pnc-bulk-cb" @click.stop="toggleProjectDocSelection(it.id)">
+                        <el-checkbox :model-value="projectDocBulkSelected.includes(it.id)" />
+                      </div>
                       <div class="pn-ref-head">
                         <el-icon class="pn-ref-icon" :size="22"><component :is="refCardIcon(it)" /></el-icon>
                         <span class="pn-ref-kind">{{ refKindLabel(it) }}</span>
@@ -2849,11 +3002,18 @@ onUnmounted(() => {
                       v-for="it in grp.items"
                       :key="it.id"
                       class="project-note-card"
-                      :class="{ 'project-ref-card': it.type !== 'note' }"
+                      :class="{
+                        'project-ref-card': it.type !== 'note',
+                        'is-bulk-pick': projectDocBulkPickActive,
+                        'is-bulk-selected': projectDocBulkSelected.includes(it.id)
+                      }"
                       shadow="hover"
-                      @click="openProjectDocumentItem(it)"
+                      @click="onProjectDocCardClick(it, $event)"
                       @contextmenu.prevent="showProjectDocContextMenu($event, it)"
                     >
+                      <div class="pnc-bulk-cb" @click.stop="toggleProjectDocSelection(it.id)">
+                        <el-checkbox :model-value="projectDocBulkSelected.includes(it.id)" />
+                      </div>
                       <template v-if="it.type === 'note'">
                         <div class="pn-title">{{ it.title?.trim() || `笔记 #${it.id}` }}</div>
                         <div class="pn-meta">{{ it.created_at?.slice(0, 16) }}</div>
@@ -3062,58 +3222,105 @@ onUnmounted(() => {
               >
                 新增分支
               </el-button>
-              <template v-if="copilotMode === 'global'">
-                <el-tooltip content="关联项目（并入表格统计摘要）" placement="bottom">
-                  <el-popover placement="right-start" :width="320" trigger="click">
-                    <template #reference>
-                      <el-button circle size="small" text :icon="FolderOpened" class="copilot-link-icon-btn" />
-                    </template>
-                    <div class="global-ai-link-popover">
-                      <div class="global-ai-link-popover-title">关联项目</div>
-                      <p class="global-ai-link-popover-hint">与当前选中的对话分支绑定，切换分支会切换勾选状态。</p>
-                      <el-scrollbar max-height="280px">
-                        <el-checkbox-group
-                          v-model="globalBranchLinkedProjectIds"
-                          class="global-ai-link-checks"
-                          @change="schedulePersistGlobalBranchContext"
+            </div>
+            <div v-if="copilotMode === 'global'" class="copilot-branch-context-bar">
+              <el-tooltip content="关联项目数据" placement="left">
+                <el-popover
+                  placement="left-start"
+                  :width="328"
+                  :offset="10"
+                  trigger="click"
+                  popper-class="global-ai-popover-premium"
+                  :hide-after="0"
+                >
+                  <template #reference>
+                    <span class="copilot-ctx-ico-wrap">
+                      <el-badge
+                        :value="globalBranchLinkedProjectIds.length"
+                        :hidden="globalBranchLinkedProjectIds.length === 0"
+                        type="primary"
+                        class="copilot-ctx-badge"
+                      >
+                        <button
+                          type="button"
+                          class="copilot-context-icon-btn"
+                          :class="{ 'is-linked': globalBranchLinkedProjectIds.length > 0 }"
+                          aria-label="关联项目"
                         >
-                          <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-ai-link-cb">
-                            {{ p.name }}
-                          </el-checkbox>
-                        </el-checkbox-group>
-                      </el-scrollbar>
-                    </div>
-                  </el-popover>
-                </el-tooltip>
-                <el-tooltip content="关联书柜笔记（注入正文上下文）" placement="bottom">
-                  <el-popover placement="right-start" :width="340" trigger="click" @show="loadBookshelfNotesForPicker">
-                    <template #reference>
-                      <el-button circle size="small" text :icon="Reading" class="copilot-link-icon-btn" />
-                    </template>
-                    <div class="global-ai-link-popover">
-                      <div class="global-ai-link-popover-title">关联书柜笔记</div>
-                      <p class="global-ai-link-popover-hint">仅列出书柜中「未归入项目」的笔记；与当前分支绑定。</p>
-                      <el-scrollbar v-if="bookshelfNotesPickerList.length" max-height="300px">
-                        <el-checkbox-group
-                          v-model="globalBranchLinkedNoteIds"
-                          class="global-ai-link-checks"
-                          @change="schedulePersistGlobalBranchContext"
+                          <el-icon :size="18"><FolderOpened /></el-icon>
+                        </button>
+                      </el-badge>
+                    </span>
+                  </template>
+                  <div class="global-ai-link-popover">
+                    <div class="global-ai-link-popover-title">关联项目</div>
+                    <p class="global-ai-link-popover-hint">与当前选中的对话分支绑定，切换分支会切换勾选状态。</p>
+                    <el-scrollbar max-height="280px">
+                      <el-checkbox-group
+                        v-model="globalBranchLinkedProjectIds"
+                        class="global-ai-link-checks"
+                        @change="schedulePersistGlobalBranchContext"
+                      >
+                        <el-checkbox v-for="p in projects" :key="p.id" :label="p.id" class="global-ai-link-cb">
+                          {{ p.name }}
+                        </el-checkbox>
+                      </el-checkbox-group>
+                    </el-scrollbar>
+                  </div>
+                </el-popover>
+              </el-tooltip>
+              <el-tooltip content="关联全局笔记" placement="left">
+                <el-popover
+                  placement="left-start"
+                  :width="340"
+                  :offset="10"
+                  trigger="click"
+                  popper-class="global-ai-popover-premium"
+                  :hide-after="0"
+                  @show="loadBookshelfNotesForPicker"
+                >
+                  <template #reference>
+                    <span class="copilot-ctx-ico-wrap">
+                      <el-badge
+                        :value="globalBranchLinkedNoteIds.length"
+                        :hidden="globalBranchLinkedNoteIds.length === 0"
+                        type="warning"
+                        class="copilot-ctx-badge"
+                      >
+                        <button
+                          type="button"
+                          class="copilot-context-icon-btn"
+                          :class="{ 'is-linked': globalBranchLinkedNoteIds.length > 0 }"
+                          aria-label="关联书柜笔记"
                         >
-                          <el-checkbox
-                            v-for="n in bookshelfNotesPickerList"
-                            :key="n.id"
-                            :label="n.id"
-                            class="global-ai-link-cb"
-                          >
-                            {{ n.title?.trim() || `笔记 #${n.id}` }}
-                          </el-checkbox>
-                        </el-checkbox-group>
-                      </el-scrollbar>
-                      <el-empty v-else description="暂无书柜笔记" :image-size="56" />
-                    </div>
-                  </el-popover>
-                </el-tooltip>
-              </template>
+                          <el-icon :size="18"><Reading /></el-icon>
+                        </button>
+                      </el-badge>
+                    </span>
+                  </template>
+                  <div class="global-ai-link-popover">
+                    <div class="global-ai-link-popover-title">关联书柜笔记</div>
+                    <p class="global-ai-link-popover-hint">仅列出书柜中「未归入项目」的笔记；与当前分支绑定。</p>
+                    <el-scrollbar v-if="bookshelfNotesPickerList.length" max-height="300px">
+                      <el-checkbox-group
+                        v-model="globalBranchLinkedNoteIds"
+                        class="global-ai-link-checks"
+                        @change="schedulePersistGlobalBranchContext"
+                      >
+                        <el-checkbox
+                          v-for="n in bookshelfNotesPickerList"
+                          :key="n.id"
+                          :label="n.id"
+                          class="global-ai-link-cb"
+                        >
+                          {{ n.title?.trim() || `笔记 #${n.id}` }}
+                        </el-checkbox>
+                      </el-checkbox-group>
+                    </el-scrollbar>
+                    <el-empty v-else description="暂无书柜笔记" :image-size="56" />
+                  </div>
+                </el-popover>
+              </el-tooltip>
             </div>
             <el-scrollbar class="copilot-topic-scroll">
               <button
@@ -3763,18 +3970,87 @@ onUnmounted(() => {
 }
 .project-notes-toolbar {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 12px;
   margin-bottom: 16px;
 }
+
+.project-notes-toolbar--bulk {
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  border: 1px solid #e2e8f0;
+}
+
+.pdtb-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.pdtb-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.pdtb-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.proj-doc-toolbar-enter-active,
+.proj-doc-toolbar-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+
+.proj-doc-toolbar-enter-from,
+.proj-doc-toolbar-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
 .project-notes-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 14px;
 }
 .project-note-card {
+  position: relative;
   cursor: pointer;
   border-radius: 12px;
 }
+
+.project-note-card.is-bulk-selected {
+  outline: 2px solid #6366f1;
+  outline-offset: 0;
+}
+
+.pnc-bulk-cb {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 3;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.project-note-card:hover .pnc-bulk-cb,
+.project-note-card.is-bulk-pick .pnc-bulk-cb {
+  opacity: 1;
+}
+
 .pn-title {
   font-weight: 600;
   color: #0f172a;
@@ -4111,20 +4387,62 @@ onUnmounted(() => {
 }
 
 .copilot-topic-new-branch {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px 10px;
+  padding: 0 12px 8px;
 }
 
 .copilot-new-branch-btn {
-  flex: 1;
-  min-width: 120px;
+  width: 100%;
 }
 
-.copilot-link-icon-btn {
-  flex-shrink: 0;
+.copilot-branch-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  margin: 0 10px 10px;
+  padding: 0 4px;
+}
+
+.copilot-ctx-ico-wrap {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.copilot-ctx-badge :deep(.el-badge__content) {
+  border: 2px solid #f9fafb;
+}
+
+.copilot-context-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #64748b;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.copilot-context-icon-btn:hover {
+  background: #f1f5f9;
+  color: #334155;
+  border-color: #e2e8f0;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.copilot-context-icon-btn.is-linked {
+  color: #4f46e5;
+  background: #eef2ff;
+  border-color: #c7d2fe;
 }
 
 .global-ai-link-popover-title {
@@ -4476,5 +4794,20 @@ onUnmounted(() => {
 :deep(.el-dialog) {
   border-radius: 16px;
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.16);
+}
+</style>
+
+<style>
+/* 全局 AI Popover：提层与圆角阴影（teleport 到 body） */
+.global-ai-popover-premium.el-popper {
+  border-radius: 12px !important;
+  box-shadow: 0 14px 44px rgba(15, 23, 42, 0.18) !important;
+  border: 1px solid #e2e8f0 !important;
+  z-index: 10020 !important;
+  padding: 12px 14px !important;
+}
+
+.global-ai-popover-premium .el-scrollbar__bar {
+  opacity: 0.75;
 }
 </style>

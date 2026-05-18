@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { Collection, Delete, Document, EditPen, FolderAdd, FolderOpened, Picture, Plus, Reading, Upload } from '@element-plus/icons-vue'
+import { Collection, Delete, Document, EditPen, FolderAdd, FolderOpened, Operation, Picture, Plus, Reading, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { CheckboxValueType } from 'element-plus'
 import { computed, onMounted, ref, watch } from 'vue'
 import KnowledgeGraphCanvas from './KnowledgeGraphCanvas.vue'
 import type { ItemRow, NotebookRow } from '../../../preload/index'
@@ -117,6 +118,94 @@ const filteredItems = computed(() => {
   }
   return sorted
 })
+
+const shelfBulkManual = ref(false)
+const shelfBulkSelected = ref<number[]>([])
+const shelfBulkDeleting = ref(false)
+
+const shelfBulkPickActive = computed(() => shelfBulkManual.value || shelfBulkSelected.value.length > 0)
+const shelfBulkBarVisible = computed(() => shelfBulkSelected.value.length > 0)
+const shelfSelectableIds = computed(() => filteredItems.value.map((i) => i.id))
+
+const shelfBulkSelectAllChecked = computed(
+  () =>
+    shelfSelectableIds.value.length > 0 &&
+    shelfSelectableIds.value.every((id) => shelfBulkSelected.value.includes(id))
+)
+
+const shelfBulkSelectAllIndeterminate = computed(() => {
+  const n = shelfBulkSelected.value.length
+  const all = shelfSelectableIds.value.length
+  return n > 0 && n < all
+})
+
+watch(filteredItems, (list) => {
+  const valid = new Set(list.map((i) => i.id))
+  shelfBulkSelected.value = shelfBulkSelected.value.filter((id) => valid.has(id))
+})
+
+function toggleShelfBulkManual(): void {
+  shelfBulkManual.value = !shelfBulkManual.value
+}
+
+function toggleShelfSelection(id: number): void {
+  const s = new Set(shelfBulkSelected.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  shelfBulkSelected.value = [...s]
+  if (shelfBulkSelected.value.length > 0) shelfBulkManual.value = true
+}
+
+function onShelfCardClick(it: ItemRow, e: MouseEvent): void {
+  if (shelfBulkPickActive.value) {
+    e.preventDefault()
+    toggleShelfSelection(it.id)
+    return
+  }
+  openItem(it)
+}
+
+function onShelfBulkSelectAllChange(val: CheckboxValueType): void {
+  if (val === true) {
+    shelfBulkSelected.value = [...shelfSelectableIds.value]
+    shelfBulkManual.value = true
+  } else {
+    shelfBulkSelected.value = []
+  }
+}
+
+function exitShelfBulkMode(): void {
+  shelfBulkSelected.value = []
+  shelfBulkManual.value = false
+}
+
+async function shelfBulkDelete(): Promise<void> {
+  const ids = shelfBulkSelected.value
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(`确定要删除选中的 ${ids.length} 个文件吗？此操作不可恢复。`, '批量删除', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  shelfBulkDeleting.value = true
+  try {
+    const r = await window.api.deleteBookshelfItemsBatch(ids)
+    if (!r.success) {
+      ElMessage.error(r.message || '删除失败')
+      return
+    }
+    ElMessage.success(r.message || '已删除')
+    exitShelfBulkMode()
+    await loadItems()
+    await graphCanvasRef.value?.refresh()
+  } finally {
+    shelfBulkDeleting.value = false
+  }
+}
 
 const treeProps = { label: 'name', children: 'children' } as const
 
@@ -262,6 +351,10 @@ async function onNotebookDrop(draggingNode: { data: NotebookRow }, dropNode: { d
 }
 
 function onItemDragStart(it: ItemRow, ev: DragEvent): void {
+  if (shelfBulkPickActive.value) {
+    ev.preventDefault()
+    return
+  }
   if (it.type === 'note' || it.type === 'file' || it.type === 'document') {
     ev.dataTransfer?.setData('application/x-datanode-bookshelf-item', String(it.id))
     ev.dataTransfer!.effectAllowed = 'move'
@@ -637,9 +730,34 @@ defineExpose({ refreshLibrary: async () => {
       </aside>
 
       <main class="bookshelf-main">
-        <header class="bookshelf-toolbar">
+        <transition name="bs-toolbar" mode="out-in">
+        <header v-if="shelfBulkBarVisible" key="bulk" class="bookshelf-toolbar bookshelf-toolbar--bulk">
+          <div class="bookshelf-bulk-left">
+            <span class="bookshelf-bulk-count">已选择 {{ shelfBulkSelected.length }} 项</span>
+            <el-checkbox
+              :model-value="shelfBulkSelectAllChecked"
+              :indeterminate="shelfBulkSelectAllIndeterminate"
+              @change="onShelfBulkSelectAllChange"
+            >
+              全选当前列表
+            </el-checkbox>
+          </div>
+          <div class="bookshelf-bulk-right">
+            <el-button type="danger" plain :loading="shelfBulkDeleting" @click="shelfBulkDelete">批量删除</el-button>
+            <el-button @click="exitShelfBulkMode">退出选择</el-button>
+          </div>
+        </header>
+        <header v-else key="normal" class="bookshelf-toolbar">
           <el-button type="primary" :icon="Plus" :disabled="!hasAnyNotebook" @click="newNote">新建笔记</el-button>
           <el-button :icon="Upload" :disabled="!hasAnyNotebook" @click="importDocument">导入文档</el-button>
+          <el-button
+            :type="shelfBulkManual ? 'primary' : 'default'"
+            plain
+            :icon="Operation"
+            @click="toggleShelfBulkManual"
+          >
+            批量选择
+          </el-button>
           <el-input
             v-model="searchQuery"
             placeholder="搜索标题 / 正文 / 路径"
@@ -651,6 +769,7 @@ defineExpose({ refreshLibrary: async () => {
             <el-option label="标题 A-Z" value="title_asc" />
           </el-select>
         </header>
+        </transition>
 
         <el-scrollbar class="card-scroll">
           <div class="library-cards">
@@ -687,12 +806,19 @@ defineExpose({ refreshLibrary: async () => {
                 v-for="it in filteredItems"
                 :key="it.id"
                 class="shelf-card"
-                :class="{ 'shelf-card--note': it.type === 'note' }"
-                draggable="true"
+                :class="{
+                  'shelf-card--note': it.type === 'note',
+                  'is-bulk-pick': shelfBulkPickActive,
+                  'is-bulk-selected': shelfBulkSelected.includes(it.id)
+                }"
+                :draggable="!shelfBulkPickActive"
                 @dragstart="onItemDragStart(it, $event)"
-                @click="openItem(it)"
+                @click="onShelfCardClick(it, $event)"
                 @contextmenu.prevent="openNoteCtx($event, it)"
               >
+                <div class="shelf-bulk-cb" @click.stop="toggleShelfSelection(it.id)">
+                  <el-checkbox :model-value="shelfBulkSelected.includes(it.id)" />
+                </div>
                 <template v-if="it.type === 'note'">
                   <div class="note-cover" :style="noteCoverStyle(it.content_json)">
                     <el-dropdown trigger="click" @command="(c: string) => onCoverCommand(it, c)" @click.stop>
@@ -883,6 +1009,43 @@ defineExpose({ refreshLibrary: async () => {
   background: #fff;
   border-bottom: 1px solid #e2e8f0;
 }
+
+.bookshelf-toolbar--bulk {
+  justify-content: space-between;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+.bookshelf-bulk-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.bookshelf-bulk-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.bookshelf-bulk-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.bs-toolbar-enter-active,
+.bs-toolbar-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+.bs-toolbar-enter-from,
+.bs-toolbar-leave-to {
+  opacity: 0;
+  transform: translateY(-5px);
+}
 .shelf-search {
   flex: 1;
   min-width: 200px;
@@ -960,6 +1123,27 @@ defineExpose({ refreshLibrary: async () => {
   transition:
     box-shadow 0.15s,
     transform 0.15s;
+  position: relative;
+}
+.shelf-card.is-bulk-selected {
+  outline: 2px solid #6366f1;
+  outline-offset: 0;
+}
+.shelf-bulk-cb {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 4;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.shelf-card:hover .shelf-bulk-cb,
+.shelf-card.is-bulk-pick .shelf-bulk-cb {
+  opacity: 1;
 }
 .shelf-card:hover {
   box-shadow: 0 12px 32px rgba(15, 23, 42, 0.1);

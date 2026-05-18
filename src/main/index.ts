@@ -13,6 +13,7 @@ import {
   deleteProject,
   renameProjectItem,
   deleteProjectDocumentItem,
+  deleteProjectDocumentItems,
   getDefaultNotebookId,
   getAllTags,
   getAppSettings,
@@ -76,6 +77,7 @@ import {
   moveNotebookToParent,
   moveBookshelfItemToNotebook,
   deleteBookshelfGlobalItem,
+  deleteBookshelfGlobalItems,
   duplicateBookshelfNote,
   renameBookshelfItem
 } from './db'
@@ -296,6 +298,28 @@ app.whenReady().then(() => {
       return { success: false, message: String(error) }
     }
   })
+  ipcMain.handle('bookshelf:items:delete-batch', (_, itemIds: number[]) => {
+    try {
+      const ids = Array.isArray(itemIds)
+        ? [...new Set(itemIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+        : []
+      const { ok, failed } = deleteBookshelfGlobalItems(ids)
+      if (ids.length > 0 && ok === 0) {
+        return {
+          success: false,
+          message: failed ? `未能删除所选条目（${failed} 项失败）` : '删除失败',
+          data: { ok, failed }
+        }
+      }
+      return {
+        success: true,
+        message: ids.length === 0 ? '未选择条目' : failed ? `已删除 ${ok} 项，${failed} 项未能删除` : `已删除 ${ok} 项`,
+        data: { ok, failed }
+      }
+    } catch (error) {
+      return { success: false, message: String(error), data: { ok: 0, failed: 0 } }
+    }
+  })
   ipcMain.handle('bookshelf:note:duplicate', (_, itemId: number) => {
     try {
       const id = duplicateBookshelfNote(Number(itemId))
@@ -374,6 +398,29 @@ app.whenReady().then(() => {
       return { success: true, message: '已移除' }
     } catch (error) {
       return { success: false, message: String(error) }
+    }
+  })
+  ipcMain.handle('project:items:delete-batch', (_, itemIds: number[], projectId: number) => {
+    try {
+      const ids = Array.isArray(itemIds)
+        ? [...new Set(itemIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0))]
+        : []
+      const pid = Number(projectId)
+      const { ok, failed } = deleteProjectDocumentItems(ids, pid)
+      if (ids.length > 0 && ok === 0) {
+        return {
+          success: false,
+          message: failed ? `未能删除所选条目（${failed} 项失败）` : '删除失败',
+          data: { ok, failed }
+        }
+      }
+      return {
+        success: true,
+        message: ids.length === 0 ? '未选择条目' : failed ? `已删除 ${ok} 项，${failed} 项未能删除` : `已删除 ${ok} 项`,
+        data: { ok, failed }
+      }
+    } catch (error) {
+      return { success: false, message: String(error), data: { ok: 0, failed: 0 } }
     }
   })
   ipcMain.handle('shell:open-path', (_, filePath: string) => {
